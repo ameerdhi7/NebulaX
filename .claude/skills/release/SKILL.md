@@ -220,7 +220,7 @@ gh release edit v0.16.0 --notes "$(cat <<'EOF'
 Protocol version is now **32** — run `nebula kill` on an older daemon before the new TUI attaches.
 
 ```
-curl -fsSL https://raw.githubusercontent.com/AgentSystemLabs/nebula/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/ameerdhi7/NebulaX/main/install.sh | sh
 ```
 EOF
 )"
@@ -230,17 +230,18 @@ Keep the `'EOF'` quoted so zsh does not command-substitute the backticks in the 
 notes to a file and pass `--notes-file` — the safer form when the notes run long. Show the user the
 finished notes in your reply, not only on GitHub.
 
-Writing to the API needs an account with write access to `AgentSystemLabs/nebula`. Check first:
+Writing to the API needs an account with write access to `ameerdhi7/NebulaX`. Check first:
 
 ```bash
 gh auth status
 ```
 
-Two accounts are usually logged in. `webdevcody` is the admin; `codyseibert` has read only and fails
-with "must be a collaborator". If the wrong one is active:
-`gh auth switch --hostname github.com --user webdevcody`.
+Two accounts are usually logged in. `ameerdhi7` owns this fork; `asarray` has no write access and
+fails with "Permission to ameerdhi7/NebulaX.git denied". If the wrong one is active:
+`gh auth switch --hostname github.com --user ameerdhi7`.
 
-The repo slug is **`AgentSystemLabs/nebula`** — never `webdevcody/nebula`.
+The repo slug is **`ameerdhi7/NebulaX`** — never `AgentSystemLabs/nebula` (that is the upstream this
+fork came from; releases never go there).
 
 ## 8. Confirm and report
 
