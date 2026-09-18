@@ -87,7 +87,7 @@
     <a class="brand" href="index.html"><span class="dot"></span>nubla<span style="color:var(--gold)">&nbsp;x</span></a>
     <div class="spacer"></div>
     <a class="top" href="index.html">← Home</a>
-    <a class="top" href="https://github.com/ameerdhi7/nebula">GitHub</a>
+    <a class="top" href="https://github.com/ameerdhi7/NebulaX">GitHub</a>
   </div>
 </header>
 
@@ -136,7 +136,7 @@
       md = md.replace(/\]\((?:docs\/)?([a-z-]+)\.md(#[\w-]+)?\)/g,
         (m,name,hash)=> DOCS[name] ? '](docs.html?doc='+name+(hash||'')+')' : m);
       md = md.replace(/\]\((?:\.\.\/)?ARCHITECTURE\.md\)/g,
-        '](https://github.com/ameerdhi7/nebula/blob/main/ARCHITECTURE.md)');
+        '](https://github.com/ameerdhi7/NebulaX/blob/main/ARCHITECTURE.md)');
       el.innerHTML = marked.parse(md);
       document.querySelector('main').scrollTo(0,0);
       window.scrollTo(0,0);
