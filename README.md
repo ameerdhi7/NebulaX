@@ -1,25 +1,27 @@
 <div align="center">
 
-# nebula
+# nubla x
 
 **Mission control for your coding agents.**
 
 Run **Claude Code**, **Codex**, **Cursor**, **Pi** and **Muse** across every project and git WORKTREE you own — from one
 terminal, one keyboard, one tree. They keep working when you close it.
 
-[![Release](https://img.shields.io/github/v/release/AgentSystemLabs/nebula?style=flat-square&color=e8c547&label=release)](https://github.com/AgentSystemLabs/nebula/releases)
-[![Build](https://img.shields.io/github/actions/workflow/status/AgentSystemLabs/nebula/release.yml?style=flat-square&label=build)](https://github.com/AgentSystemLabs/nebula/actions)
+[![Release](https://img.shields.io/github/v/release/ameerdhi7/NebulaX?style=flat-square&color=e8c547&label=release)](https://github.com/ameerdhi7/NebulaX/releases)
+[![Build](https://img.shields.io/github/actions/workflow/status/ameerdhi7/NebulaX/release.yml?style=flat-square&label=build)](https://github.com/ameerdhi7/NebulaX/actions)
 [![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey?style=flat-square)](#install)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-dea584?style=flat-square)](https://www.rust-lang.org)
 
-[**Keys**](docs/keys.md) · [**Commands**](docs/commands.md) · [**Sessions**](docs/sessions.md) · [**Configuration**](docs/configuration.md) · [**How it works**](docs/how-it-works.md)
+[**Website**](site/) · [**Keys**](docs/keys.md) · [**Commands**](docs/commands.md) · [**Sessions**](docs/sessions.md) · [**Configuration**](docs/configuration.md) · [**How it works**](docs/how-it-works.md)
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/AgentSystemLabs/nebula/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/ameerdhi7/NebulaX/main/install.sh | sh
 ```
 
-<img src="assets/screenshot.png" alt="nebula: projects, worktrees and sessions on the left, a live Claude Code session on the right" width="100%">
+<img src="assets/screenshot.png" alt="nubla x: projects, worktrees and sessions on the left, a live Claude Code session on the right" width="100%">
+
+<sub>The command stays <code>nebula</code>; the product is <b>nubla x</b>. Forked from <a href="https://github.com/AgentSystemLabs/nebula">AgentSystemLabs/nebula</a>.</sub>
 
 </div>
 
@@ -76,7 +78,7 @@ re-checks through the login shell at launch.
 macOS or Linux — the same command installs and updates:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/AgentSystemLabs/nebula/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/ameerdhi7/NebulaX/main/install.sh | sh
 ```
 
 It downloads the prebuilt binary for your platform from the latest GitHub release into `~/.local/bin`
