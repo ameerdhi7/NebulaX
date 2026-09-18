@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>nebula docs</title>
-<meta name="description" content="nebula documentation — keys, commands, sessions, configuration, the Jira ticket board and how it works.">
+<title>nubla x docs</title>
+<meta name="description" content="nubla x documentation — keys, commands, sessions, configuration, the Jira ticket board and how it works.">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -84,7 +84,7 @@
 <header class="nav">
   <div class="nav-in">
     <button class="menu-btn" onclick="document.getElementById('side').classList.toggle('open')">☰</button>
-    <a class="brand" href="index.html"><span class="dot"></span>nebula</a>
+    <a class="brand" href="index.html"><span class="dot"></span>nubla<span style="color:var(--gold)">&nbsp;x</span></a>
     <div class="spacer"></div>
     <a class="top" href="index.html">← Home</a>
     <a class="top" href="https://github.com/ameerdhi7/nebula">GitHub</a>
@@ -122,7 +122,7 @@
     document.querySelectorAll('aside a').forEach(a=>{
       a.classList.toggle('active', a.dataset.doc===doc);
     });
-    document.title = 'nebula docs · ' + DOCS[doc];
+    document.title = 'nubla x docs · ' + DOCS[doc];
   }
   async function load(doc){
     setActive(doc);

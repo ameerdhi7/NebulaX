@@ -3,9 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>nebula — mission control for your coding agents</title>
+<title>nubla x — mission control for your coding agents</title>
 <meta name="description" content="Run Claude Code, Codex, Cursor, Pi and Muse across every project and git worktree from one terminal. A ~4 MB Rust binary. Agents keep working when you close it.">
-<meta property="og:title" content="nebula — mission control for your coding agents">
+<meta property="og:title" content="nubla x — mission control for your coding agents">
 <meta property="og:description" content="One tree, one keyboard, one daemon. Read the dots, not the screens.">
 <meta property="og:type" content="website">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
@@ -167,7 +167,7 @@
 
 <header class="nav">
   <div class="wrap nav-in">
-    <a class="brand" href="#top"><span class="dot"></span>nebula</a>
+    <a class="brand" href="#top"><span class="dot"></span>nubla<span style="color:var(--gold)">&nbsp;x</span></a>
     <div class="spacer"></div>
     <nav class="links">
       <a class="link" href="#features">Features</a>
@@ -198,7 +198,7 @@
     </div>
     <div class="platform">macOS &amp; Linux · same command installs and updates</div>
     <div class="shot">
-      <img src="assets/screenshot.png" alt="nebula: projects, worktrees and sessions on the left, a live Claude Code session on the right" loading="lazy">
+      <img src="assets/screenshot.png" alt="nubla x: projects, worktrees and sessions on the left, a live Claude Code session on the right" loading="lazy">
       <div class="glow"></div>
     </div>
   </section>
@@ -208,7 +208,7 @@
     <div class="sec-head">
       <div class="kick">Read the dots, not the screens</div>
       <h2>Three agents, three tabs, and no idea which one needs you</h2>
-      <p>nebula replaces the reading with a tree and a color. Every session carries a status dot;
+      <p>nubla x replaces the reading with a tree and a color. Every session carries a status dot;
         every parent rolls up its children — so a red dot on a collapsed project tells you exactly where to look.</p>
     </div>
     <div class="dots">
@@ -236,16 +236,16 @@
         <p>Yellow mid-turn, violet finished-and-unseen, green read, red waiting on you — plus a <code>n done</code> badge counting the terminals you still owe a look.</p></div>
       <div class="card"><div class="ic">🔀</div><h3>Real git worktrees, one keystroke</h3>
         <p><code>n</code> branches off into an actual <code>git worktree</code>. Two agents in two directories never collide, and a worktree hook can claim a port or route.</p></div>
-      <div class="card"><div class="ic">🎯</div><h3>Agents that drive nebula back</h3>
+      <div class="card"><div class="ic">🎯</div><h3>Agents that drive nubla x back</h3>
         <p>Tell a session <em>"do this in a worktree"</em> and it runs <code>nebula worktree</code>, then restarts itself resumed inside the new checkout.</p></div>
       <div class="card"><div class="ic">🔧</div><h3>Every pull request &amp; issue, in place</h3>
-        <p>nebula asks <code>gh</code> what's open. Read a PR under the cursor, <code>g</code> for its diff, <code>y</code> to comment, <code>n</code> for a session scoped to it.</p></div>
+        <p>nubla x asks <code>gh</code> what's open. Read a PR under the cursor, <code>g</code> for its diff, <code>y</code> to comment, <code>n</code> for a session scoped to it.</p></div>
       <div class="card"><div class="ic">🔎</div><h3>Diff, find, grep, browse</h3>
         <p><code>g</code> the diff viewer, <code>f</code> the file finder, <code>F</code> a git grep, <code>b</code> the tree browser — all scoped to the selected worktree, one key from anywhere.</p></div>
       <div class="card"><div class="ic">⌘</div><h3><code>/</code> finds anything, anywhere</h3>
         <p>The palette spans every workspace, sorted by attention: needs-feedback first, then running, then unseen — so <code>/</code> <code>Enter</code> is the fastest way back to whatever needs you.</p></div>
       <div class="card"><div class="ic">🛰️</div><h3>It follows you to other machines</h3>
-        <p><code>nebula ssh &lt;host&gt;</code> opens nebula there, installing if missing. <code>nebula tunnel</code> puts that machine's TUI in a browser tab over one ssh tunnel.</p></div>
+        <p><code>nebula ssh &lt;host&gt;</code> opens nubla x there, installing if missing. <code>nebula tunnel</code> puts that machine's TUI in a browser tab over one ssh tunnel.</p></div>
       <div class="card"><div class="ic">📴</div><h3>No Electron, no browser, no MCP</h3>
         <p>One ~4 MB Rust binary and a unix socket. A daemon and a ratatui client — that's the whole thing.</p></div>
     </div>
@@ -270,7 +270,7 @@
           <a class="btn gold" href="docs.html?doc=jira-tickets">Read the board docs</a>
         </div>
       </div>
-      <div><img src="assets/nebula-board.png" alt="nebula Jira ticket board with cards, filters, evidence badges and status dots" loading="lazy"></div>
+      <div><img src="assets/nebula-board.png" alt="nubla x Jira ticket board with cards, filters, evidence badges and status dots" loading="lazy"></div>
     </div>
   </section>
 
@@ -279,7 +279,7 @@
     <div class="sec-head">
       <div class="kick">Supported harnesses</div>
       <h2>Five CLIs out of the box</h2>
-      <p>Install the CLI, pick it in the <code>n</code> picker, done. A sixth, Grok, needs one config block. Teach nebula any new CLI with one <code>harnesses</code> entry.</p>
+      <p>Install the CLI, pick it in the <code>n</code> picker, done. A sixth, Grok, needs one config block. Teach nubla x any new CLI with one <code>harnesses</code> entry.</p>
     </div>
     <div class="harn">
       <div class="h"><img src="https://www.google.com/s2/favicons?domain=claude.com&sz=128" alt="Claude"><b>Claude</b><span>claude</span></div>
@@ -314,7 +314,7 @@
       <p style="color:var(--dim);max-width:520px;margin:14px auto 0">The full docs render right here in the browser — keys, commands, sessions, configuration and how it all works.</p>
       <div class="docsgrid">
         <a href="docs.html?doc=keys"><b>Keys</b><span>Every default binding &amp; the mouse</span></a>
-        <a href="docs.html?doc=commands"><b>Commands</b><span>The full nebula CLI</span></a>
+        <a href="docs.html?doc=commands"><b>Commands</b><span>The full nebula CLI (the binary keeps its name)</span></a>
         <a href="docs.html?doc=sessions"><b>Sessions</b><span>Pickers, presets, cloud</span></a>
         <a href="docs.html?doc=configuration"><b>Configuration</b><span>config.json &amp; settings</span></a>
         <a href="docs.html?doc=jira-tickets"><b>Ticket board</b><span>The Jira workflow</span></a>
@@ -327,7 +327,7 @@
 <footer>
   <div class="wrap foot-in">
     <div>
-      <div class="brand" style="font-size:16px;margin-bottom:6px"><span class="dot"></span>nebula</div>
+      <div class="brand" style="font-size:16px;margin-bottom:6px"><span class="dot"></span>nubla<span style="color:var(--gold)">&nbsp;x</span></div>
       <span class="pill">MIT licensed · built with Rust</span>
       <div style="margin-top:10px;color:var(--dim2);font-size:12.5px">
         Forked from <a href="https://github.com/AgentSystemLabs/nebula" style="color:var(--dim)">AgentSystemLabs/nebula</a>
