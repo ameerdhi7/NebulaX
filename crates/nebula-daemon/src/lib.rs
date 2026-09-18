@@ -1,6 +1,7 @@
 pub mod attach;
 pub mod claude_bg;
 pub mod config;
+pub mod eligibility;
 pub mod git;
 pub mod hooks;
 pub mod lifecycle;
@@ -8,6 +9,7 @@ pub mod metrics;
 pub mod open_files;
 pub mod pr_scope;
 pub mod prompt_history;
+pub mod providers;
 pub mod pty;
 pub mod registry;
 pub mod server;
@@ -15,6 +17,7 @@ pub mod session_title;
 pub mod sibling;
 pub mod status;
 pub mod store;
+pub mod sync;
 pub mod worktree_hooks;
 
 use anyhow::{bail, Context, Result};
@@ -79,6 +82,13 @@ async fn serve() -> Result<()> {
         }
         Ok(_) => {}
         Err(e) => tracing::warn!(error = %e, "boot sweep failed"),
+    }
+    // Runs left mid-flight when the previous daemon died can't be proven live;
+    // mark them interrupted rather than presuming they finished (F2.7).
+    match store.interrupt_running_runs() {
+        Ok(n) if n > 0 => tracing::info!(count = n, "boot sweep: interrupted orphaned runs"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "run reconciliation failed"),
     }
 
     // Hook receiver: loopback HTTP endpoint the claude hook one-liners hit.
@@ -220,6 +230,30 @@ async fn serve() -> Result<()> {
                         Err(e) => tracing::warn!(
                             project = %project.name, error = %e, "worktree sync failed"
                         ),
+                    }
+                }
+            }
+        });
+    }
+
+    // Provider sync: keep the ticket board current whether or not any client
+    // is open (PRD §8). A beat runs on startup to prime the board, then every
+    // `TRACKER_SYNC_MS` (default 60s; tests shorten it). Off in the common
+    // case where no connection is configured — the beat is a no-op then.
+    {
+        let daemon = daemon.clone();
+        tokio::spawn(async move {
+            // Prime once at boot so a reopened client sees fresh tickets.
+            daemon.sync_now().await;
+            let mut interval = env_interval(nebula_core::env::TRACKER_SYNC_MS, 60_000);
+            loop {
+                tokio::select! {
+                    _ = daemon.shutdown.cancelled() => break,
+                    _ = interval.tick() => {
+                        let n = daemon.sync_now().await;
+                        if n > 0 {
+                            tracing::debug!(tickets = n, "provider sync beat");
+                        }
                     }
                 }
             }

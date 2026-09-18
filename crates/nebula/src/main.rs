@@ -55,6 +55,7 @@ fn main() -> Result<()> {
         Some(Command::Worktree { name, base }) => nebula_tui::run_worktree(name.join(" "), base),
         Some(Command::Spawn { task, kind }) => nebula_tui::run_spawn(task.join(" "), kind),
         Some(Command::Open { files }) => nebula_tui::run_open(files),
+        Some(Command::Stage { status, summary }) => nebula_tui::run_stage(status, summary),
         Some(Command::Browser {
             port,
             bind,
@@ -71,6 +72,15 @@ fn main() -> Result<()> {
                 browser::DEFAULT_BIND
             }),
             credential,
+            open: !no_open,
+        }),
+        Some(Command::Web {
+            port,
+            bind,
+            no_open,
+        }) => nebula_web::run_web(nebula_web::WebOpts {
+            port,
+            bind: bind.unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
             open: !no_open,
         }),
         Some(Command::Ssh {

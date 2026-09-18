@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>nebula board</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #161922; --line: #232838; --fg: #e6e9ef;
+    --dim: #8b93a7; --accent: #6ea8fe; --ok: #4ec9a5; --warn: #e0a852;
+    --err: #e06c75; --chip: #1e2432;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 16px;
+    padding: 12px 20px; border-bottom: 1px solid var(--line); background: var(--panel);
+    position: sticky; top: 0;
+  }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .02em; }
+  header .conns { color: var(--dim); font-size: 12px; }
+  header .spacer { flex: 1; }
+  button {
+    background: var(--chip); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 6px; padding: 5px 10px; font-size: 12px; cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  .status { color: var(--dim); font-size: 12px; padding: 0 20px; }
+  main { padding: 12px 20px 40px; }
+  .filters { display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }
+  .filters button.on { border-color: var(--accent); color: var(--accent); }
+  .card {
+    display: grid; grid-template-columns: 90px 1fr auto; gap: 12px; align-items: start;
+    padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px;
+    background: var(--panel); margin-bottom: 8px;
+  }
+  .card .key { color: var(--accent); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .card .summary { color: var(--fg); }
+  .card .sub { color: var(--dim); font-size: 12px; margin-top: 3px; }
+  .card .blocked { color: var(--warn); font-size: 12px; margin-top: 3px; }
+  .chip {
+    display: inline-block; padding: 1px 8px; border-radius: 999px;
+    background: var(--chip); color: var(--dim); font-size: 11px; margin-left: 6px;
+  }
+  .chip.ready { color: var(--ok); } .chip.failed, .chip.interrupted { color: var(--err); }
+  .chip.needs_input { color: var(--warn); } .chip.running { color: var(--accent); }
+  .ev { font-size: 11px; margin-top: 4px; }
+  .ev .pass { color: var(--ok); } .ev .fail { color: var(--err); }
+  .ev .stale { color: var(--warn); } .ev .skip, .ev .other { color: var(--dim); }
+  .empty { color: var(--dim); padding: 40px; text-align: center; }
+  .actions { display: flex; gap: 6px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>nebula · ticket board</h1>
+  <span class="conns" id="conns"></span>
+  <span class="spacer"></span>
+  <button id="sync">Sync</button>
+</header>
+<div class="status" id="status">connecting…</div>
+<main>
+  <div class="filters" id="filters"></div>
+  <div id="board"></div>
+</main>
+<script>
+const FILTERS = ["Needs attention", "Queue", "Active", "Ready", "All"];
+let filter = "All";
+const tickets = new Map();       // flat id -> ticket
+let connections = [];
+const idKey = (id) => (id ? id.connection + "" + id.native : "");
+
+const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
+ws.onopen = () => setStatus("connected");
+ws.onclose = () => setStatus("disconnected — reload to reconnect");
+ws.onmessage = (e) => {
+  let msg; try { msg = JSON.parse(e.data); } catch { return; }
+  const p = msg.payload || {};
+  switch (msg.kind) {
+    case "tickets/snapshot":
+      tickets.clear();
+      (p.tickets || []).forEach((t) => tickets.set(idKey(t.id), t));
+      connections = p.connections || [];
+      render();
+      break;
+    case "tickets/upsert":
+      if (p.ticket) { tickets.set(idKey(p.ticket.id), p.ticket); render(); }
+      break;
+    case "connections/status":
+      { const i = connections.findIndex((c) => c.id === p.id);
+        if (i >= 0) connections[i] = p; else connections.push(p); render(); }
+      break;
+  }
+};
+function send(kind, payload) { ws.send(JSON.stringify({ kind, payload })); }
+document.getElementById("sync").onclick = () => { send("board/sync-now", null); setStatus("syncing…"); };
+function setStatus(s) { document.getElementById("status").textContent = s; }
+
+function matchesFilter(t) {
+  const w = t.workflow, attn = (t.unread_pr_activity > 0) ||
+    ["needs_input", "failed", "interrupted"].includes(w);
+  switch (filter) {
+    case "Needs attention": return attn;
+    case "Queue": return !t.removed_reason && (!w || w === "queued");
+    case "Active": return w === "running" || w === "paused";
+    case "Ready": return w === "ready";
+    default: return true;
+  }
+}
+function chip(t) {
+  if (t.workflow) return t.stage && t.workflow === "running" ? t.stage : t.workflow;
+  return (t.status_category || "").replace("_", " ");
+}
+function ordered() {
+  return [...tickets.values()].filter(matchesFilter).sort((a, b) => {
+    const ba = a.blocked_reason ? 1 : 0, bb = b.blocked_reason ? 1 : 0;
+    if (ba !== bb) return ba - bb;
+    if (a.rank != null && b.rank != null && a.rank !== b.rank) return a.rank - b.rank;
+    return (a.key || "").localeCompare(b.key || "");
+  });
+}
+function render() {
+  document.getElementById("conns").textContent = connections
+    .map((c) => `${c.label || c.id}: ${c.health}`).join("   ");
+  const f = document.getElementById("filters");
+  f.innerHTML = "";
+  FILTERS.forEach((name) => {
+    const b = document.createElement("button");
+    b.textContent = name; if (name === filter) b.className = "on";
+    b.onclick = () => { filter = name; render(); };
+    f.appendChild(b);
+  });
+  const board = document.getElementById("board");
+  const rows = ordered();
+  if (!rows.length) {
+    board.innerHTML = `<div class="empty">${connections.length ? "no tickets in this view" : "no connection configured — add one in config.json"}</div>`;
+    return;
+  }
+  board.innerHTML = "";
+  rows.forEach((t) => board.appendChild(cardEl(t)));
+}
+function cardEl(t) {
+  const el = document.createElement("div"); el.className = "card";
+  const key = document.createElement("div"); key.className = "key"; key.textContent = t.key || t.id.native;
+  const mid = document.createElement("div");
+  const chipText = chip(t);
+  mid.innerHTML = `<div class="summary">${escape(t.summary)}` +
+    (chipText ? ` <span class="chip ${t.workflow || ""}">${escape(chipText)}</span>` : "") + `</div>` +
+    `<div class="sub">${escape(t.status_name || "")}${t.assignee ? " · " + escape(t.assignee) : ""}${t.priority ? " · " + escape(t.priority) : ""}</div>` +
+    (t.blocked_reason ? `<div class="blocked">blocked: ${escape(t.blocked_reason)}</div>` : "") +
+    evidenceEl(t);
+  const actions = document.createElement("div"); actions.className = "actions";
+  if (!t.blocked_reason && t.workflow !== "running") {
+    const start = document.createElement("button");
+    start.textContent = t.workflow ? "Restart" : "Start";
+    start.onclick = () => { send("board/start", { tickets: [t.id], policy: "implementation_only" }); setStatus("starting " + (t.key || "") + "…"); };
+    actions.appendChild(start);
+  }
+  if (t.url) {
+    const open = document.createElement("button");
+    open.textContent = "Jira"; open.onclick = () => window.open(t.url, "_blank");
+    actions.appendChild(open);
+  }
+  el.append(key, mid, actions);
+  return el;
+}
+function evidenceEl(t) {
+  if (!t.evidence || !t.evidence.length) return "";
+  const cls = (s) => ["passed"].includes(s) ? "pass" : s === "failed" ? "fail" : s === "stale" ? "stale" : ["skipped"].includes(s) ? "skip" : "other";
+  const parts = t.evidence.map((b) =>
+    `<span class="${cls(b.state)}">${escape(b.kind)}: ${escape(b.state)}${b.label ? " (" + escape(b.label) + ")" : ""}</span>`);
+  return `<div class="ev">${parts.join(" · ")}</div>`;
+}
+function escape(s) { return String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+</script>
+</body>
+</html>

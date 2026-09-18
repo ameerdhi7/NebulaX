@@ -355,6 +355,47 @@ pub async fn spawn_sibling_for_current_agent(task: &str, kind: Option<AgentKind>
     Ok(())
 }
 
+/// CLI: `nebula stage <status> [--summary <text>]` from inside a ticket's
+/// agent session — report the run's outcome to the daemon, which maps the
+/// session to its ticket run, captures the diff as evidence on `done`, and
+/// updates the board. Never spawns a daemon: no daemon means no run to report.
+pub async fn stage_current_agent(status: &str, summary: Option<&str>) -> Result<()> {
+    let agent_id = current_agent_id("stage")?;
+    let Some(parsed) = nebula_core::ext::StageStatus::parse(status.trim()) else {
+        bail!("unknown status {status:?} — use one of: done, needs-input, blocked, failed");
+    };
+    let sock = paths::socket_path();
+    let Ok(stream) = try_connect(&sock).await else {
+        bail!("no nebula daemon is running — nothing recorded");
+    };
+    let mut conn = handshake(stream).await?;
+    let req_id = ONE_SHOT_REQ_ID;
+    let payload = nebula_core::ext::encode(&nebula_core::ext::StageReport {
+        agent_id,
+        status: parsed,
+        summary: summary.unwrap_or_default().to_string(),
+    });
+    write_frame(
+        &mut conn.stream,
+        &ClientRequest::Ext {
+            req_id,
+            kind: nebula_core::ext::kinds::STAGE_REPORT.to_string(),
+            json: payload,
+        },
+    )
+    .await?;
+    await_ack(&mut conn, req_id).await?;
+    match parsed {
+        nebula_core::ext::StageStatus::Done => {
+            println!(
+                "reported this ticket done — the board captured your changes and marks it Ready."
+            )
+        }
+        _ => println!("reported this ticket as {status} on the board."),
+    }
+    Ok(())
+}
+
 /// CLI: `nebula open <file>…` from inside an agent session — resolve the
 /// paths here, where the cwd is the agent's, and hand them to the daemon,
 /// which raises every attached TUI's FILE TABS on them. Never spawns a

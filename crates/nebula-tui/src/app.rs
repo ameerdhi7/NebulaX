@@ -1335,6 +1335,9 @@ pub enum Overlay {
     Issues(crate::issues::IssuesView),
     /// `c`: the BRANCH SWITCHER — the ROOT WORKTREE onto another branch.
     BranchSwitch(crate::branch_switch::BranchSwitchView),
+    /// `Shift+J`: the TICKET BOARD — the Jira tickets assigned to you, synced
+    /// by the daemon (see `crate::tickets`).
+    Tickets(crate::tickets::TicketBoardView),
 }
 
 /// Rows optimistically removed for an in-flight DeleteWorktree, kept so an
@@ -2790,6 +2793,10 @@ pub struct App {
     /// `issues::refresh_selected`), so `i` paints rows at once; the modal
     /// re-asks on open only past `issues::FRESH`, and on its `r`.
     pub issues: HashMap<ProjectId, crate::issues::IssueList>,
+    /// The TICKET BOARD's last-known state — the Jira tickets the daemon
+    /// synced and streamed inside the `Ext` envelope. Survives the overlay
+    /// closing so `Shift+J` paints at once. Fed by `crate::tickets::apply_ext`.
+    pub board: crate::tickets::BoardData,
     /// Projects with a list lookup in flight, and ones whose first ask
     /// `gh` couldn't answer (the modal says so rather than spinning).
     pub issues_inflight: std::collections::HashSet<ProjectId>,
@@ -2962,6 +2969,7 @@ impl App {
             pr_cache_dirty: false,
             pr_detail_stale: std::collections::HashSet::new(),
             issues: HashMap::new(),
+            board: crate::tickets::BoardData::default(),
             issues_inflight: std::collections::HashSet::new(),
             issues_failed: std::collections::HashSet::new(),
             issues_due: HashMap::new(),

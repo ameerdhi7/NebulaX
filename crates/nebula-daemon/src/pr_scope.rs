@@ -106,6 +106,39 @@ pub(crate) fn issue_rule(scope: &IssueScope<'_>) -> String {
     )
 }
 
+/// Everything the ticket rule says: the ticket it is for and the checkout the
+/// TICKET SESSION works in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TicketScope<'a> {
+    pub key: &'a str,
+    pub summary: &'a str,
+    pub worktree: &'a Path,
+    pub branch: &'a str,
+}
+
+/// The context attached to an AGENT started on a ticket from the board: which
+/// ticket the session exists for, where it works, and how to report its
+/// outcome. Concise on purpose — it is regenerated on every spawn/resume, so a
+/// restarted session keeps its scope. The detailed description/acceptance
+/// criteria reach the agent as the first prompt (first spawn) and from the
+/// tracker; this rule is what survives a resume.
+pub(crate) fn ticket_rule(scope: &TicketScope<'_>) -> String {
+    let TicketScope {
+        key,
+        summary,
+        worktree,
+        branch,
+    } = scope;
+    format!(
+        "[nebula] This session is implementing ticket {key}: {summary}. It runs in the worktree \
+         at {wt} on branch `{branch}`: do every edit, test and commit there and nowhere else. \
+         When the implementation is complete run `nebula stage done --summary \"<what you \
+         changed>\"`; if you need a decision from the user run `nebula stage needs-input --summary \
+         \"<the question>\"`. Keep all work scoped to this ticket.",
+        wt = worktree.display(),
+    )
+}
+
 /// The rule as the first prompt of a CLI with no system-prompt flag: the
 /// same text, plus a line that keeps the agent from treating it as a task.
 fn rule_as_first_prompt(rule: &str) -> String {
@@ -122,11 +155,13 @@ fn rule_as_first_prompt(rule: &str) -> String {
 pub(crate) fn combined_rule(
     pr: Option<&PrScope<'_>>,
     issue: Option<&IssueScope<'_>>,
+    ticket: Option<&TicketScope<'_>>,
 ) -> Option<String> {
     let parts: Vec<String> = pr
         .map(rule)
         .into_iter()
         .chain(issue.map(issue_rule))
+        .chain(ticket.map(ticket_rule))
         .collect();
     (!parts.is_empty()).then(|| parts.join("\n\n"))
 }
@@ -443,17 +478,29 @@ mod tests {
             worktree: Path::new("/w/nebula-worktrees/fix-login"),
             branch: "fix-login",
         };
-        assert_eq!(combined_rule(None, None), None);
+        assert_eq!(combined_rule(None, None, None), None);
         assert_eq!(
-            combined_rule(Some(&pr), None).as_deref(),
+            combined_rule(Some(&pr), None, None).as_deref(),
             Some(rule(&pr).as_str())
         );
         assert_eq!(
-            combined_rule(None, Some(&issue)).as_deref(),
+            combined_rule(None, Some(&issue), None).as_deref(),
             Some(issue_rule(&issue).as_str())
         );
-        let both = combined_rule(Some(&pr), Some(&issue)).unwrap();
+        let both = combined_rule(Some(&pr), Some(&issue), None).unwrap();
         assert_eq!(both, format!("{}\n\n{}", rule(&pr), issue_rule(&issue)));
+
+        // A ticket scope adds its rule as a third arm.
+        let ticket = TicketScope {
+            key: "AQ-1066",
+            summary: "Sync tickets",
+            worktree: Path::new("/w/nebula-worktrees/feat-aq-1066"),
+            branch: "feat/aq-1066",
+        };
+        let t = combined_rule(None, None, Some(&ticket)).unwrap();
+        assert!(t.contains("AQ-1066"), "{t}");
+        assert!(t.contains("nebula stage done"), "{t}");
+        assert!(t.contains("feat/aq-1066"), "{t}");
     }
 
     #[test]

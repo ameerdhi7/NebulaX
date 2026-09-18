@@ -188,6 +188,182 @@ pub struct Daemon {
     /// — so an attach replays how the run ended instead of running it
     /// again. Dropped when the run starts again, is stopped, or its row goes.
     finished_runs: Mutex<HashMap<TerminalId, FinishedRun>>,
+    /// Serializes the ticket scheduler's dispatch pass so two triggers (a batch
+    /// start and a run finishing at once) can't both claim the last slot.
+    dispatch_gate: tokio::sync::Mutex<()>,
+}
+
+/// A worktree branch name for a ticket: `feat/<key>-<short-slug>`, e.g.
+/// `feat/aq-1069-wire-the-board`. Lower-cased, non-alphanumerics folded to `-`,
+/// clipped so it stays a sane branch and directory name.
+fn ticket_branch(key: &str, summary: &str) -> String {
+    let slugify = |s: &str, max_words: usize| {
+        s.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_ascii_lowercase()
+                } else {
+                    ' '
+                }
+            })
+            .collect::<String>()
+            .split_whitespace()
+            .take(max_words)
+            .collect::<Vec<_>>()
+            .join("-")
+    };
+    let key_slug = slugify(key, 4);
+    let summary_slug = slugify(summary, 5);
+    let mut branch = format!("feat/{key_slug}");
+    if !summary_slug.is_empty() {
+        branch.push('-');
+        branch.push_str(&summary_slug);
+    }
+    branch.chars().take(60).collect()
+}
+
+/// Epoch milliseconds now — timestamps for inbox events.
+fn now_epoch_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Run a git command in `dir` and return its trimmed stdout, or `None` when
+/// git is missing or exits non-zero. Best-effort — used only to summarise
+/// evidence, never to gate anything.
+fn git_output(dir: &std::path::Path, args: &[&str]) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Run each check command through the login shell in `dir` and fold the
+/// results into one `Checks` badge (F4.1). All exiting 0 is passed; any
+/// non-zero is failed. Blocking — the caller runs it on a blocking thread.
+fn run_checks(
+    dir: &std::path::Path,
+    commands: &[String],
+    revision: Option<String>,
+) -> nebula_core::ext::EvidenceBadge {
+    use nebula_core::ext::{EvidenceBadge, EvidenceKind, EvidenceState};
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+    let total = commands.len();
+    let mut failed = 0usize;
+    for cmd in commands {
+        let ok = std::process::Command::new(&shell)
+            .args(["-lc", cmd])
+            .current_dir(dir)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !ok {
+            failed += 1;
+        }
+    }
+    let plural = if total == 1 { "" } else { "s" };
+    let (state, label) = if failed == 0 {
+        (
+            EvidenceState::Passed,
+            format!("{total} check{plural} passed"),
+        )
+    } else {
+        (
+            EvidenceState::Failed,
+            format!("{failed}/{total} check{plural} failed"),
+        )
+    };
+    EvidenceBadge {
+        kind: EvidenceKind::Checks,
+        state,
+        revision,
+        label: Some(label),
+    }
+}
+
+/// The base→result diff of a checkout, best-effort: the committed diff since
+/// the branch left origin's default, plus anything still uncommitted. Capped so
+/// one huge diff can't blow the frame budget.
+fn capture_diff(dir: &std::path::Path) -> String {
+    const MAX: usize = 200 * 1024;
+    let mut out = String::new();
+    if let Some(base) =
+        git_output(dir, &["rev-parse", "--abbrev-ref", "origin/HEAD"]).filter(|b| !b.is_empty())
+    {
+        if let Some(committed) = git_output(dir, &["diff", &format!("{base}...HEAD")]) {
+            out.push_str(&committed);
+        }
+    }
+    if let Some(dirty) = git_output(dir, &["diff"]) {
+        if !dirty.trim().is_empty() {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&dirty);
+        }
+    }
+    if out.len() > MAX {
+        out.truncate(MAX);
+        out.push_str("\n… (diff truncated)");
+    }
+    out
+}
+
+/// The opening prompt an agent launched on a ticket receives: the ticket's key,
+/// summary, and source requirements, then the instruction to implement it in
+/// the checkout it was started in. (When the persisted, resume-rebuilt ticket
+/// rule lands — F2.2 — this becomes an appended system prompt instead.)
+fn ticket_task_prompt(ticket: &nebula_core::ext::Ticket) -> String {
+    let mut out = format!(
+        "[nebula] You are implementing ticket {key}: {summary}\n",
+        key = ticket.key,
+        summary = ticket.summary,
+    );
+    if let Some(desc) = &ticket.fields.description {
+        if !desc.trim().is_empty() {
+            out.push_str(&format!("\nDescription:\n{desc}\n"));
+        }
+    }
+    if let Some(ac) = &ticket.fields.acceptance_criteria {
+        if !ac.trim().is_empty() {
+            out.push_str(&format!("\nAcceptance criteria:\n{ac}\n"));
+        }
+    }
+    if let Some(url) = &ticket.url {
+        out.push_str(&format!("\nTicket: {url}\n"));
+    }
+    out.push_str(
+        "\nWork only in this worktree. Read the ticket, implement it, and commit your work. \
+         Do not push or open a pull request unless asked. When you have finished, run \
+         `nebula stage done --summary \"<what you changed>\"` to mark the ticket ready; if you \
+         need a decision from the user, run `nebula stage needs-input --summary \"<the question>\"` \
+         instead.",
+    );
+    out
+}
+
+/// The opening prompt an independent review agent receives (F4.2): review the
+/// changes on this branch without touching them, and report a verdict via
+/// `nebula stage`.
+fn review_prompt(ticket: &nebula_core::ext::Ticket) -> String {
+    format!(
+        "[nebula] You are REVIEWING ticket {key}: {summary}\n\nAnother agent implemented this in \
+         the worktree you are in. Inspect its changes with `git diff` (committed and uncommitted). \
+         Assess correctness, quality, and whether they satisfy the ticket. Do NOT modify any code \
+         — this is a review only. When you are done, run `nebula stage done --summary \"<your \
+         verdict>\"` if it is good to merge, or `nebula stage failed --summary \"<what needs \
+         changing>\"` if it needs work.",
+        key = ticket.key,
+        summary = ticket.summary,
+    )
 }
 
 impl Daemon {
@@ -214,6 +390,7 @@ impl Daemon {
             prewarm_sweep: Mutex::new(None),
             resumes: Mutex::new(HashMap::new()),
             finished_runs: Mutex::new(HashMap::new()),
+            dispatch_gate: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -559,6 +736,718 @@ impl Daemon {
             pr_seen: self.store.load_pr_seen()?,
             ui_state: self.store.load_ui_state()?,
         })
+    }
+
+    /// The ticket-side state, as the `tickets/snapshot` ext event a client
+    /// gets right after `Subscribe` — the analogue of [`Self::snapshot`] for
+    /// the Jira-agentic feature. Blocked reasons are recomputed on read so a
+    /// dependency satisfied since the last sync shows as unblocked at once.
+    pub fn ticket_snapshot(&self) -> ServerEvent {
+        let mut tickets = self.store.load_tickets().unwrap_or_default();
+        crate::eligibility::annotate_blocked_reasons(&mut tickets);
+        crate::sync::overlay_run_state(&self.store, &mut tickets);
+        let connections = self.store.load_connections().unwrap_or_default();
+        let inbox = self.store.load_inbox().unwrap_or_default();
+        let snapshot = nebula_core::ext::TicketsSnapshot {
+            tickets,
+            connections,
+            inbox,
+        };
+        ServerEvent::Ext {
+            req_id: None,
+            kind: nebula_core::ext::kinds::TICKETS_SNAPSHOT.into(),
+            json: nebula_core::ext::encode(&snapshot),
+        }
+    }
+
+    /// Compute a progress report over the current cohort (PRD §11 / F5.4): the
+    /// tickets, their workflow and source states, and evidence coverage, as of
+    /// now. Counts observed current state only — honest about the fact that
+    /// period throughput is not yet tracked.
+    pub fn report_summary(&self) -> nebula_core::ext::ReportSummary {
+        use nebula_core::ext::{
+            EvidenceKind, EvidenceState, ReportSummary, SourceCategory, WorkflowState,
+        };
+        let mut tickets = self.store.load_tickets().unwrap_or_default();
+        // Drop tickets that left the assignment scope from the cohort.
+        tickets.retain(|t| t.removed_reason.is_none());
+        crate::eligibility::annotate_blocked_reasons(&mut tickets);
+        crate::sync::overlay_run_state(&self.store, &mut tickets);
+
+        let mut r = ReportSummary {
+            generated_ms: now_epoch_ms(),
+            total: tickets.len(),
+            ..Default::default()
+        };
+        for t in &tickets {
+            match t.status_category {
+                SourceCategory::ToDo => r.source_todo += 1,
+                SourceCategory::InProgress => r.source_in_progress += 1,
+                SourceCategory::Done => r.source_done += 1,
+                SourceCategory::Unknown => {}
+            }
+            if t.blocked_reason.is_some() {
+                r.blocked += 1;
+            }
+            match t.workflow {
+                Some(WorkflowState::Queued) => r.queued += 1,
+                Some(WorkflowState::Running) | Some(WorkflowState::Paused) => r.running += 1,
+                Some(WorkflowState::NeedsInput) | Some(WorkflowState::Interrupted) => {
+                    r.needs_input += 1
+                }
+                Some(WorkflowState::Blocked) => r.blocked += 1,
+                Some(WorkflowState::Ready) => r.ready += 1,
+                Some(WorkflowState::Failed) | Some(WorkflowState::Cancelled) => r.failed += 1,
+                None => {
+                    if t.blocked_reason.is_none() {
+                        r.not_started += 1;
+                    }
+                }
+            }
+            for badge in &t.evidence {
+                let good = matches!(badge.state, EvidenceState::Passed);
+                match badge.kind {
+                    EvidenceKind::Implementation if good => r.implementation_captured += 1,
+                    EvidenceKind::Checks if good => r.checks_passed += 1,
+                    EvidenceKind::Review if good => r.review_passed += 1,
+                    _ => {}
+                }
+            }
+        }
+        let needs_attention = tickets
+            .iter()
+            .filter(|t| {
+                matches!(
+                    t.workflow,
+                    Some(WorkflowState::NeedsInput)
+                        | Some(WorkflowState::Failed)
+                        | Some(WorkflowState::Interrupted)
+                )
+            })
+            .count();
+        let unread = self
+            .store
+            .load_inbox()
+            .unwrap_or_default()
+            .iter()
+            .filter(|e| e.read_ms.is_none())
+            .count();
+        r.attention = needs_attention + unread;
+        r
+    }
+
+    /// Run one provider sync beat now (the board's force-refresh, and the
+    /// startup priming beat). Reads the connection roster fresh from config so
+    /// an edited token or a new connection takes effect without a restart.
+    pub async fn sync_now(&self) -> usize {
+        let cfg = crate::config::Config::load();
+        let roster = cfg.connection_roster();
+        crate::sync::sync_once(&self.store, &self.events, &roster, &[]).await
+    }
+
+    /// Start a batch of tickets (the board's `s` / `board/start`): enqueue each
+    /// eligible one, then dispatch up to the concurrency limit. A single `s` is
+    /// just a batch of one — under the limit it launches at once, over it the
+    /// ticket shows Queued until a slot frees (PRD §7).
+    pub async fn start_batch(
+        self: &Arc<Self>,
+        tickets: &[nebula_core::ext::TicketId],
+    ) -> Result<()> {
+        let all = self.store.load_tickets()?;
+        let mut last_err: Option<anyhow::Error> = None;
+        for id in tickets {
+            let Some(ticket) = all.iter().find(|t| &t.id == id) else {
+                continue;
+            };
+            if let Some(reason) = &ticket.blocked_reason {
+                last_err = Some(anyhow::anyhow!("{} is blocked: {reason}", ticket.key));
+                continue;
+            }
+            if self.store.enqueue_run(id)?.is_some() {
+                self.broadcast_ticket(id);
+            }
+        }
+        self.dispatch().await;
+        match last_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    /// Start one ticket now (kept for callers that want a single immediate
+    /// start): enqueue it and dispatch.
+    pub async fn start_ticket(self: &Arc<Self>, ticket: &nebula_core::ext::TicketId) -> Result<()> {
+        self.start_batch(std::slice::from_ref(ticket)).await
+    }
+
+    /// Fill free concurrency slots from the queue (PRD §7): count the runs with
+    /// a still-live agent, and launch queued tickets oldest-first up to
+    /// `workflow.max_concurrent`. Serialized by `dispatch_gate` so two triggers
+    /// can't both claim the last slot and double-launch.
+    pub async fn dispatch(self: &Arc<Self>) {
+        let _gate = self.dispatch_gate.lock().await;
+        let limit = crate::config::Config::load().workflow.max_concurrent.max(1);
+        loop {
+            // A slot is taken by a `running` run whose agent is still alive; a
+            // stopped-without-report agent frees its slot (its ticket shows
+            // NeedsInput) so the queue keeps moving.
+            let active = self
+                .store
+                .running_runs()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|(_, agent)| {
+                    agent
+                        .as_ref()
+                        .is_some_and(|a| self.is_alive(&SessionRef::Agent(a.clone())))
+                })
+                .count();
+            if active >= limit {
+                break;
+            }
+            let Some((run_id, ticket_id)) = self
+                .store
+                .queued_runs()
+                .unwrap_or_default()
+                .into_iter()
+                .next()
+            else {
+                break;
+            };
+            match self.launch_queued(&run_id, &ticket_id).await {
+                Ok(()) => self.broadcast_ticket(&ticket_id),
+                Err(e) => {
+                    tracing::warn!(error = %e, ticket = %ticket_id.native, "dispatch failed");
+                    // Failing to launch must not wedge the queue on this run.
+                    let _ = self.store.set_latest_run_state(&ticket_id, "failed");
+                    self.broadcast_ticket(&ticket_id);
+                }
+            }
+        }
+    }
+
+    /// Provision the ticket's worktree, launch its agent, and move its queued
+    /// run to `running`.
+    async fn launch_queued(
+        self: &Arc<Self>,
+        run_id: &str,
+        ticket_id: &nebula_core::ext::TicketId,
+    ) -> Result<()> {
+        let ticket = self
+            .store
+            .load_tickets()?
+            .into_iter()
+            .find(|t| &t.id == ticket_id)
+            .context("ticket not found")?;
+        let agent_id = self.provision_and_launch(&ticket).await?;
+        self.store.activate_run(run_id, &agent_id)?;
+        Ok(())
+    }
+
+    /// Resolve the ticket's repo/project, cut (or reuse) its worktree, and
+    /// launch a Claude agent on it with the ticket as its opening context.
+    /// Returns the launched agent's id. The agent carries the ticket as its
+    /// `starting_prompt` (not a persisted resume-rebuilt rule — that is F2.2).
+    async fn provision_and_launch(
+        self: &Arc<Self>,
+        ticket: &nebula_core::ext::Ticket,
+    ) -> Result<AgentId> {
+        let cfg = crate::config::Config::load();
+        let conn = cfg
+            .connections
+            .iter()
+            .find(|c| c.id == ticket.id.connection)
+            .context("no such connection")?;
+        let repo = conn.repo.trim();
+        if repo.is_empty() {
+            bail!(
+                "connection '{}' has no `repo` configured — set it to the path of a project to \
+                 start tickets from it",
+                conn.id
+            );
+        }
+        let repo_path = std::path::Path::new(repo);
+        let (projects, worktrees, _, _) = self.store.load_tree()?;
+        let project = projects
+            .iter()
+            .find(|p| p.repo_path == repo_path)
+            .with_context(|| {
+                format!("the repo {repo} is not a nebula project yet — add it first")
+            })?;
+
+        let branch = ticket_branch(&ticket.key, &ticket.summary);
+        let base = conn.base_branch.trim();
+        let base = (!base.is_empty()).then_some(base);
+        let worktree_id = match worktrees
+            .iter()
+            .find(|w| w.project_id == project.id && w.branch == branch)
+        {
+            Some(existing) => existing.id.clone(),
+            None => match self.create_worktree(&project.id, &branch, base).await? {
+                EntityId::Worktree(id) => id,
+                _ => bail!("worktree creation returned an unexpected entity"),
+            },
+        };
+
+        let prompt = ticket_task_prompt(ticket);
+        let created = self
+            .create_agent(CreateAgentSpec {
+                worktree: worktree_id,
+                name: ticket.key.clone(),
+                kind: AgentKind::Claude,
+                custom_harness: None,
+                model: None,
+                effort: None,
+                auto_title: false,
+                cloud_prompt: None,
+                starting_prompt: Some(prompt),
+                pr_url: None,
+                issue_url: None,
+            })
+            .await?;
+        let agent_id = match created {
+            EntityId::Agent(id) => id,
+            _ => bail!("agent creation returned an unexpected entity"),
+        };
+        // Persist the ticket ref so the ticket rule is rebuilt on every resume
+        // (F2.2). The first spawn already carries the detailed task as its
+        // starting prompt; the persisted rule is what a restart re-derives.
+        let _ = self.store.set_agent_ticket_ref(
+            &agent_id,
+            &nebula_core::ext::TicketRef {
+                connection: ticket.id.connection.clone(),
+                native: ticket.id.native.clone(),
+                key: ticket.key.clone(),
+                summary: ticket.summary.clone(),
+            },
+        );
+        Ok(agent_id)
+    }
+
+    /// Apply an agent's `nebula stage` report to its run (execution-plan
+    /// F2.3/D5): a `done` captures the diff as implementation evidence and the
+    /// run becomes Ready; anything else records the state the agent named. The
+    /// daemon captures the evidence itself rather than trusting the agent's
+    /// word for it. Errs when the session has no run — `nebula stage` only
+    /// means something on a ticket started from the board.
+    pub fn report_stage(
+        self: &Arc<Self>,
+        agent_id: &AgentId,
+        status: nebula_core::ext::StageStatus,
+        summary: &str,
+    ) -> Result<()> {
+        use crate::store::AgentRole;
+        use nebula_core::ext::StageStatus;
+
+        // Route the report to the right stage by the agent's role on the run.
+        let Some((ticket, role)) = self.store.run_role_for_agent(agent_id)? else {
+            bail!(
+                "this session has no ticket run — `nebula stage` reports on a ticket started \
+                 from the board"
+            );
+        };
+
+        let key = self
+            .store
+            .ticket_key(&ticket)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| ticket.native.clone());
+
+        match role {
+            AgentRole::Implement => {
+                let (state, evidence) = match status {
+                    StageStatus::Done => ("ready", self.capture_implementation_evidence(agent_id)),
+                    StageStatus::NeedsInput | StageStatus::Blocked => ("needs_input", Vec::new()),
+                    StageStatus::Failed => ("failed", Vec::new()),
+                };
+                self.store
+                    .report_run_for_agent(agent_id, state, summary, &evidence)?;
+                self.broadcast_ticket(&ticket);
+                // A durable inbox event for the transition (PRD §10).
+                let head = self
+                    .agent_worktree_path(agent_id)
+                    .and_then(|p| git_output(&p, &["rev-parse", "--short", "HEAD"]))
+                    .unwrap_or_default();
+                let now = now_epoch_ms().to_string();
+                match status {
+                    StageStatus::Done => self.push_inbox(
+                        &ticket,
+                        "ready",
+                        format!("{key} is ready"),
+                        summary.to_string(),
+                        &head,
+                    ),
+                    StageStatus::NeedsInput | StageStatus::Blocked => self.push_inbox(
+                        &ticket,
+                        "needs_input",
+                        format!("{key} needs input"),
+                        summary.to_string(),
+                        &now,
+                    ),
+                    StageStatus::Failed => self.push_inbox(
+                        &ticket,
+                        "failed",
+                        format!("{key} failed"),
+                        summary.to_string(),
+                        &now,
+                    ),
+                }
+                // On done, run the repo's configured checks in the background
+                // (F4.1) and stream the Checks badge when they finish.
+                if matches!(status, StageStatus::Done) {
+                    let daemon = self.clone();
+                    let ticket = ticket.clone();
+                    let agent = agent_id.clone();
+                    tokio::spawn(async move {
+                        daemon.run_and_record_checks(&ticket, &agent).await;
+                    });
+                }
+            }
+            AgentRole::Review => {
+                // The reviewer's verdict is its own evidence, on the revision it
+                // assessed — it never changes the implementation's run state.
+                // A verdict alone is not approval (PRD §6): a `done` is a pass,
+                // a `failed` is changes-requested.
+                use nebula_core::ext::{EvidenceBadge, EvidenceKind, EvidenceState};
+                let (ev_state, verdict) = match status {
+                    StageStatus::Done => (EvidenceState::Passed, "review passed"),
+                    StageStatus::Failed => (EvidenceState::Failed, "changes requested"),
+                    StageStatus::NeedsInput | StageStatus::Blocked => {
+                        (EvidenceState::Skipped, "review inconclusive")
+                    }
+                };
+                let revision = self
+                    .agent_worktree_path(agent_id)
+                    .and_then(|p| git_output(&p, &["rev-parse", "--short", "HEAD"]))
+                    .filter(|h| !h.is_empty());
+                let label = if summary.trim().is_empty() {
+                    verdict.to_string()
+                } else {
+                    format!("{verdict}: {}", summary.trim())
+                };
+                self.store.add_run_evidence(
+                    &ticket,
+                    &EvidenceBadge {
+                        kind: EvidenceKind::Review,
+                        state: ev_state,
+                        revision: revision.clone(),
+                        label: Some(label.clone()),
+                    },
+                )?;
+                self.broadcast_ticket(&ticket);
+                self.push_inbox(
+                    &ticket,
+                    "review",
+                    format!("{key} review: {verdict}"),
+                    summary.to_string(),
+                    &format!("{}:{}", verdict, revision.as_deref().unwrap_or("_")),
+                );
+            }
+        }
+        // A terminal implementation report frees a concurrency slot — pull the
+        // next queued ticket in (harmless after a review report).
+        let daemon = self.clone();
+        tokio::spawn(async move {
+            daemon.dispatch().await;
+        });
+        Ok(())
+    }
+
+    /// Launch an independent review agent on a ticket's run (F4.2 / PRD §6): a
+    /// fresh session in the run's worktree that inspects the diff and reports a
+    /// verdict via `nebula stage`, recorded as Review evidence separate from the
+    /// implementation. It is told not to modify code.
+    pub async fn start_review(
+        self: &Arc<Self>,
+        ticket_id: &nebula_core::ext::TicketId,
+    ) -> Result<()> {
+        let tickets = self.store.load_tickets()?;
+        let ticket = tickets
+            .into_iter()
+            .find(|t| &t.id == ticket_id)
+            .context("ticket not found")?;
+        let run = self
+            .store
+            .latest_runs()?
+            .into_iter()
+            .find(|r| &r.ticket == ticket_id)
+            .context("no run to review — start the ticket first")?;
+        let impl_agent = run
+            .agent_id
+            .context("the run has no implementer to review")?;
+        let agent = self
+            .store
+            .get_agent(&impl_agent)?
+            .context("the run's implementer is gone")?;
+        let prompt = review_prompt(&ticket);
+        let created = self
+            .create_agent(CreateAgentSpec {
+                worktree: agent.worktree_id.clone(),
+                name: format!("review {}", ticket.key),
+                kind: AgentKind::Claude,
+                custom_harness: None,
+                model: None,
+                effort: None,
+                auto_title: false,
+                cloud_prompt: None,
+                starting_prompt: Some(prompt),
+                pr_url: None,
+                issue_url: None,
+            })
+            .await?;
+        let EntityId::Agent(review_agent) = created else {
+            bail!("agent creation returned an unexpected entity");
+        };
+        self.store.set_review_agent(ticket_id, &review_agent)?;
+        self.broadcast_ticket(ticket_id);
+        Ok(())
+    }
+
+    /// Run the ticket repo's configured check commands in the run's worktree
+    /// and record the result as a `Checks` evidence badge (F4.1 / PRD §6): all
+    /// exiting 0 is passed, any non-zero is failed, none configured is skipped —
+    /// a skipped check is never a pass. Runs off the request path; the card
+    /// shows `Checks: running` while they go and updates when they finish.
+    async fn run_and_record_checks(&self, ticket: &nebula_core::ext::TicketId, agent: &AgentId) {
+        use nebula_core::ext::{EvidenceBadge, EvidenceKind, EvidenceState};
+        let Some(path) = self.agent_worktree_path(agent) else {
+            return;
+        };
+        let cfg = crate::config::Config::load();
+        let repo = cfg
+            .connections
+            .iter()
+            .find(|c| c.id == ticket.connection)
+            .map(|c| c.repo.trim().to_string())
+            .unwrap_or_default();
+        let commands = if repo.is_empty() {
+            Vec::new()
+        } else {
+            cfg.checks_for(std::path::Path::new(&repo))
+        };
+        let revision =
+            git_output(&path, &["rev-parse", "--short", "HEAD"]).filter(|h| !h.is_empty());
+
+        // No checks configured: record skipped and stop (skipped ≠ passed).
+        if commands.is_empty() {
+            let badge = EvidenceBadge {
+                kind: EvidenceKind::Checks,
+                state: EvidenceState::Skipped,
+                revision,
+                label: Some("no checks configured".into()),
+            };
+            if self
+                .store
+                .add_run_evidence(ticket, &badge)
+                .ok()
+                .flatten()
+                .is_some()
+            {
+                self.broadcast_ticket(ticket);
+            }
+            return;
+        }
+
+        // Show them running, then run them off the async runtime.
+        let running = EvidenceBadge {
+            kind: EvidenceKind::Checks,
+            state: EvidenceState::Running,
+            revision: revision.clone(),
+            label: Some(format!("{} running", commands.len())),
+        };
+        if self
+            .store
+            .add_run_evidence(ticket, &running)
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            self.broadcast_ticket(ticket);
+        }
+        let badge = tokio::task::spawn_blocking(move || run_checks(&path, &commands, revision))
+            .await
+            .unwrap_or_else(|_| EvidenceBadge {
+                kind: EvidenceKind::Checks,
+                state: EvidenceState::Unavailable,
+                revision: None,
+                label: Some("check run failed to start".into()),
+            });
+        if self
+            .store
+            .add_run_evidence(ticket, &badge)
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            self.broadcast_ticket(ticket);
+        }
+    }
+
+    /// Best-effort implementation evidence for the agent's worktree: the short
+    /// HEAD it was captured at and how many files changed against the base. A
+    /// no-change result is recorded as `Skipped` with a reason, never as a pass.
+    fn capture_implementation_evidence(
+        &self,
+        agent_id: &AgentId,
+    ) -> Vec<nebula_core::ext::EvidenceBadge> {
+        use nebula_core::ext::{EvidenceBadge, EvidenceKind, EvidenceState};
+        let Some(path) = self.agent_worktree_path(agent_id) else {
+            return Vec::new();
+        };
+        let head = git_output(&path, &["rev-parse", "--short", "HEAD"]);
+        // Files changed since the branch left its base, plus anything still
+        // uncommitted, best-effort — a base we can't resolve just yields 0.
+        let base = git_output(&path, &["rev-parse", "--abbrev-ref", "origin/HEAD"])
+            .filter(|b| !b.is_empty());
+        let committed = base
+            .as_deref()
+            .and_then(|b| git_output(&path, &["diff", "--name-only", &format!("{b}...HEAD")]))
+            .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count())
+            .unwrap_or(0);
+        let dirty = git_output(&path, &["status", "--porcelain"])
+            .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count())
+            .unwrap_or(0);
+        let total = committed + dirty;
+        let (state, label) = if total > 0 {
+            (
+                EvidenceState::Passed,
+                format!("{total} file{} changed", if total == 1 { "" } else { "s" }),
+            )
+        } else {
+            (EvidenceState::Skipped, "no changes captured".to_string())
+        };
+        vec![EvidenceBadge {
+            kind: EvidenceKind::Implementation,
+            state,
+            revision: head.filter(|h| !h.is_empty()),
+            label: Some(label),
+        }]
+    }
+
+    /// The on-disk checkout an agent runs in, via its worktree row.
+    fn agent_worktree_path(&self, agent_id: &AgentId) -> Option<PathBuf> {
+        let agent = self.store.get_agent(agent_id).ok().flatten()?;
+        let worktree = self.store.get_worktree(&agent.worktree_id).ok().flatten()?;
+        Some(worktree.path)
+    }
+
+    /// The base→result diff of a ticket's run, captured live from its worktree
+    /// (execution-plan F2.6 / R10). On demand, not stored — always the current
+    /// truth, and it never bloats the ticket snapshot.
+    pub fn changes_for_ticket(
+        &self,
+        ticket: &nebula_core::ext::TicketId,
+    ) -> nebula_core::ext::ChangesResult {
+        use nebula_core::ext::ChangesResult;
+        let note = |msg: &str| ChangesResult {
+            ticket: ticket.clone(),
+            diff: String::new(),
+            note: Some(msg.to_string()),
+        };
+        let runs = self.store.latest_runs().unwrap_or_default();
+        let Some(run) = runs.into_iter().find(|r| &r.ticket == ticket) else {
+            return note("no run has started on this ticket yet");
+        };
+        let Some(agent_id) = run.agent_id else {
+            return note("this run has no agent");
+        };
+        let Some(path) = self.agent_worktree_path(&agent_id) else {
+            return note("the run's worktree is gone");
+        };
+        let diff = capture_diff(&path);
+        let note = diff.trim().is_empty().then(|| "no changes yet".to_string());
+        ChangesResult {
+            ticket: ticket.clone(),
+            diff,
+            note,
+        }
+    }
+
+    /// Cancel a ticket's run (board `x`): mark it cancelled and keep the
+    /// worktree. Cancelling is logical — it does not kill a live agent, which
+    /// is a separate "stop the agent" action (PRD §5).
+    pub fn cancel_ticket(self: &Arc<Self>, ticket: &nebula_core::ext::TicketId) -> Result<()> {
+        match self.store.set_latest_run_state(ticket, "cancelled")? {
+            Some(run) => {
+                self.broadcast_ticket(&run.ticket);
+                // Cancelling frees a slot — dispatch the next queued ticket.
+                let daemon = self.clone();
+                tokio::spawn(async move {
+                    daemon.dispatch().await;
+                });
+                Ok(())
+            }
+            None => bail!("no run to cancel on this ticket"),
+        }
+    }
+
+    /// Add a durable inbox event and stream it to every subscriber, unless a
+    /// duplicate (`dedupe_key`) already exists (PRD §10). `suffix` makes the key
+    /// stable per real-world change: a revision for readiness/review (one event
+    /// per revision), a timestamp for needs-input/failed (each ask is its own).
+    fn push_inbox(
+        &self,
+        ticket: &nebula_core::ext::TicketId,
+        kind: &str,
+        title: String,
+        body: String,
+        suffix: &str,
+    ) {
+        let ev = nebula_core::ext::InboxEvent {
+            dedupe_key: format!("{}:{}:{}", ticket.flat(), kind, suffix),
+            kind: kind.to_string(),
+            ticket: Some(ticket.clone()),
+            title,
+            body,
+            created_ms: now_epoch_ms(),
+            read_ms: None,
+        };
+        if self.store.insert_inbox_event(&ev).unwrap_or(false) {
+            self.broadcast(ServerEvent::Ext {
+                req_id: None,
+                kind: nebula_core::ext::kinds::INBOX_EVENT.into(),
+                json: nebula_core::ext::encode(&ev),
+            });
+        }
+    }
+
+    /// Mark one inbox event read (the board's read-marking) and stream the
+    /// updated event so every client reflects it. Local only — never touches a
+    /// provider thread (PRD §10).
+    pub fn mark_inbox_read(&self, dedupe_key: &str) {
+        if self.store.mark_inbox_read(dedupe_key).unwrap_or(false) {
+            if let Some(ev) = self
+                .store
+                .load_inbox()
+                .unwrap_or_default()
+                .into_iter()
+                .find(|e| e.dedupe_key == dedupe_key)
+            {
+                self.broadcast(ServerEvent::Ext {
+                    req_id: None,
+                    kind: nebula_core::ext::kinds::INBOX_EVENT.into(),
+                    json: nebula_core::ext::encode(&ev),
+                });
+            }
+        }
+    }
+
+    /// Re-send one ticket to every subscriber with its blocker reason and run
+    /// state overlaid — the tail of any change to how a card renders.
+    pub fn broadcast_ticket(&self, id: &nebula_core::ext::TicketId) {
+        let Ok(mut tickets) = self.store.load_tickets() else {
+            return;
+        };
+        crate::eligibility::annotate_blocked_reasons(&mut tickets);
+        crate::sync::overlay_run_state(&self.store, &mut tickets);
+        if let Some(ticket) = tickets.into_iter().find(|t| &t.id == id) {
+            self.broadcast(ServerEvent::Ext {
+                req_id: None,
+                kind: nebula_core::ext::kinds::TICKETS_UPSERT.into(),
+                json: nebula_core::ext::encode(&nebula_core::ext::TicketUpsert { ticket }),
+            });
+        }
     }
 
     fn agent_entity(&self, id: &AgentId) -> Result<Agent> {
@@ -2462,13 +3351,14 @@ impl Daemon {
         // prompt (see `pr_scope`). Rebuilt from the row's *current*
         // worktree on every spawn, so a relocated session is told where it
         // now works.
-        let (pr_url, issue_url) = if cloud_task.is_none() {
+        let (pr_url, issue_url, ticket_ref) = if cloud_task.is_none() {
             (
                 self.store.agent_pr_url(&agent.id)?,
                 self.store.agent_issue_url(&agent.id)?,
+                self.store.agent_ticket_ref(&agent.id)?,
             )
         } else {
-            (None, None)
+            (None, None, None)
         };
         let root = match &pr_url {
             Some(_) if !worktree.is_main => self
@@ -2488,7 +3378,20 @@ impl Daemon {
             worktree: &worktree.path,
             branch: &worktree.branch,
         });
-        let rule = crate::pr_scope::combined_rule(scope.as_ref(), issue_scope.as_ref());
+        // The ticket rule is rebuilt from the persisted ref and the row's
+        // current worktree on every spawn/resume (F2.2), so a restarted ticket
+        // session keeps its scope.
+        let ticket_scope = ticket_ref.as_ref().map(|t| crate::pr_scope::TicketScope {
+            key: &t.key,
+            summary: &t.summary,
+            worktree: &worktree.path,
+            branch: &worktree.branch,
+        });
+        let rule = crate::pr_scope::combined_rule(
+            scope.as_ref(),
+            issue_scope.as_ref(),
+            ticket_scope.as_ref(),
+        );
         let prompts = crate::pr_scope::launch_prompts(
             harness.system.append_flag.is_some(),
             agent.session_id.is_some(),
@@ -3491,6 +4394,32 @@ fn cli_probe_line(program: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ticket_branch_is_a_sane_slug() {
+        let b = ticket_branch("AQ-1069", "Wire the board's start action!");
+        assert!(b.starts_with("feat/aq-1069-"), "{b}");
+        assert!(
+            b.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '/'),
+            "{b}"
+        );
+        assert!(b.len() <= 60, "{b}");
+    }
+
+    #[test]
+    fn run_checks_passes_when_all_exit_zero_and_fails_otherwise() {
+        use nebula_core::ext::{EvidenceKind, EvidenceState};
+        let dir = std::env::temp_dir();
+        let pass = run_checks(&dir, &["true".into(), "true".into()], Some("abc".into()));
+        assert_eq!(pass.kind, EvidenceKind::Checks);
+        assert_eq!(pass.state, EvidenceState::Passed);
+        assert_eq!(pass.revision.as_deref(), Some("abc"));
+
+        let fail = run_checks(&dir, &["true".into(), "false".into()], None);
+        assert_eq!(fail.state, EvidenceState::Failed);
+        assert!(fail.label.unwrap().contains("1/2"));
+    }
 
     /// Claude argv: `args`, then nebula's appended guidance (worktree and
     /// spawn, one `--append-system-prompt`).

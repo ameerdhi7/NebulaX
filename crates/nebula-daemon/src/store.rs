@@ -4,6 +4,7 @@
 
 use crate::session_title::TitleState;
 use anyhow::{Context, Result};
+use nebula_core::ext::{ConnectionHealth, ConnectionStatus, SourceCategory, Ticket, TicketId};
 use nebula_core::{
     Agent, AgentId, AgentKind, AgentStatus, Link, LinkId, PrSeen, Project, ProjectId, PromptEntry,
     TerminalId, TerminalTab, Workspace, WorkspaceId, Worktree, WorktreeId, DEFAULT_WORKSPACE_ID,
@@ -267,6 +268,120 @@ const MIGRATIONS: &[&str] = &[
     // Nullable: every built-in harness reads its kind column alone.
     "
     ALTER TABLE agents ADD COLUMN custom_harness TEXT;
+    ",
+    // 28: the Jira-agentic feature's tables (execution plan §3). Each ticket-
+    // side row keeps a JSON `payload` (the lenient `ext` type serialized) plus
+    // a few indexed columns for querying, so a payload growing a field costs
+    // no migration — the JSON-envelope discipline (D1) carried into storage.
+    // Tokens never land here (D7): `connections` holds only non-secret config.
+    // All request-driven and additive; nothing backfills.
+    "
+    CREATE TABLE connections (
+      id          TEXT PRIMARY KEY,
+      kind        TEXT NOT NULL,
+      label       TEXT NOT NULL DEFAULT '',
+      base_url    TEXT NOT NULL DEFAULT '',
+      account     TEXT NOT NULL DEFAULT '',
+      config      TEXT NOT NULL DEFAULT '{}',
+      health      TEXT NOT NULL DEFAULT 'configured',
+      detail      TEXT,
+      last_sync_ms INTEGER NOT NULL DEFAULT 0,
+      created_at  INTEGER NOT NULL
+    );
+    CREATE TABLE tickets (
+      connection      TEXT NOT NULL,
+      native          TEXT NOT NULL,
+      key             TEXT NOT NULL DEFAULT '',
+      status_category TEXT NOT NULL DEFAULT 'unknown',
+      rank            REAL,
+      updated_at      TEXT,
+      removed_reason  TEXT,
+      last_synced_ms  INTEGER NOT NULL DEFAULT 0,
+      payload         TEXT NOT NULL DEFAULT '{}',
+      PRIMARY KEY (connection, native)
+    );
+    CREATE TABLE ticket_links (
+      id              TEXT PRIMARY KEY,
+      connection      TEXT NOT NULL,
+      native          TEXT NOT NULL,
+      target_native   TEXT NOT NULL,
+      kind            TEXT NOT NULL DEFAULT '',
+      blocks_this     INTEGER NOT NULL DEFAULT 0,
+      waiver          TEXT
+    );
+    CREATE TABLE deliverables (
+      id          TEXT PRIMARY KEY,
+      connection  TEXT NOT NULL,
+      native      TEXT NOT NULL,
+      project_id  TEXT,
+      base_branch TEXT,
+      worktree_id TEXT,
+      created_at  INTEGER NOT NULL
+    );
+    CREATE TABLE runs (
+      id          TEXT PRIMARY KEY,
+      connection  TEXT NOT NULL,
+      native      TEXT NOT NULL,
+      policy      TEXT NOT NULL DEFAULT 'checked',
+      state       TEXT NOT NULL DEFAULT 'queued',
+      stage       TEXT,
+      revision_cycles INTEGER NOT NULL DEFAULT 0,
+      payload     TEXT NOT NULL DEFAULT '{}',
+      created_at  INTEGER NOT NULL,
+      updated_at  INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE stage_attempts (
+      id            TEXT PRIMARY KEY,
+      run_id        TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+      deliverable_id TEXT,
+      stage         TEXT NOT NULL,
+      state         TEXT NOT NULL DEFAULT 'queued',
+      agent_id      TEXT,
+      started_at    INTEGER,
+      ended_at      INTEGER,
+      payload       TEXT NOT NULL DEFAULT '{}'
+    );
+    CREATE TABLE evidence (
+      id            TEXT PRIMARY KEY,
+      attempt_id    TEXT,
+      run_id        TEXT NOT NULL,
+      kind          TEXT NOT NULL,
+      state         TEXT NOT NULL DEFAULT 'not_run',
+      base_commit   TEXT,
+      result_commit TEXT,
+      fingerprint   TEXT,
+      artifact_path TEXT,
+      stale         INTEGER NOT NULL DEFAULT 0,
+      payload       TEXT NOT NULL DEFAULT '{}',
+      created_at    INTEGER NOT NULL
+    );
+    CREATE TABLE provider_prs (
+      connection    TEXT NOT NULL,
+      repo_id       TEXT NOT NULL,
+      pr_id         TEXT NOT NULL,
+      deliverable_id TEXT,
+      state         TEXT NOT NULL DEFAULT 'open',
+      head_revision TEXT,
+      activity_marker TEXT,
+      payload       TEXT NOT NULL DEFAULT '{}',
+      PRIMARY KEY (connection, repo_id, pr_id)
+    );
+    CREATE TABLE inbox_events (
+      dedupe_key    TEXT PRIMARY KEY,
+      kind          TEXT NOT NULL DEFAULT '',
+      connection    TEXT,
+      native        TEXT,
+      payload       TEXT NOT NULL DEFAULT '{}',
+      created_ms    INTEGER NOT NULL,
+      read_ms       INTEGER
+    );
+    ",
+    // 29: the ticket a TICKET SESSION was launched for, as a JSON `TicketRef`
+    // (connection, native, key, summary). Nullable and request-driven like
+    // `pr_url`/`issue_url`: a ticket-created agent rebuilds its ticket rule on
+    // every cold spawn and RESUME, so a restarted session keeps its context.
+    "
+    ALTER TABLE agents ADD COLUMN ticket_ref TEXT;
     ",
 ];
 
@@ -593,6 +708,29 @@ impl Store {
     /// Issue launch context for an AGENT (an ISSUE SESSION), or None.
     pub fn agent_issue_url(&self, id: &AgentId) -> Result<Option<String>> {
         self.agent_text_column(id, "issue_url")
+    }
+
+    /// Ticket launch context for an AGENT (a TICKET SESSION), or None for an
+    /// ordinary/pre-existing row. Parsed from the `ticket_ref` JSON column.
+    pub fn agent_ticket_ref(&self, id: &AgentId) -> Result<Option<nebula_core::ext::TicketRef>> {
+        Ok(self
+            .agent_text_column(id, "ticket_ref")?
+            .and_then(|j| serde_json::from_str(&j).ok()))
+    }
+
+    /// Persist the ticket a session was launched for, so its ticket rule is
+    /// rebuilt on every spawn and resume.
+    pub fn set_agent_ticket_ref(
+        &self,
+        id: &AgentId,
+        ticket: &nebula_core::ext::TicketRef,
+    ) -> Result<()> {
+        let json = serde_json::to_string(ticket)?;
+        self.conn.lock().unwrap().execute(
+            "UPDATE agents SET ticket_ref = ?2 WHERE id = ?1",
+            params![id.as_str(), json],
+        )?;
+        Ok(())
     }
 
     fn agent_text_column(&self, id: &AgentId, column: &str) -> Result<Option<String>> {
@@ -945,6 +1083,545 @@ impl Store {
         Ok(seen)
     }
 
+    // ---- tickets (Jira-agentic feature) ----
+    //
+    // A ticket is stored as its serialized `ext::Ticket` JSON in `payload`,
+    // with a few columns lifted out for querying and reconciliation. Reads
+    // decode the payload and fall back to the columns if a payload written by
+    // a newer build won't parse — the same leniency the wire types carry.
+
+    /// Insert or update one ticket. Idempotent on (connection, native).
+    pub fn upsert_ticket(&self, t: &Ticket) -> Result<()> {
+        let payload = serde_json::to_string(t)?;
+        self.conn.lock().unwrap().execute(
+            "INSERT INTO tickets (connection, native, key, status_category, rank, updated_at, removed_reason, last_synced_ms, payload)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(connection, native) DO UPDATE SET
+               key = excluded.key, status_category = excluded.status_category,
+               rank = excluded.rank, updated_at = excluded.updated_at,
+               removed_reason = excluded.removed_reason,
+               last_synced_ms = excluded.last_synced_ms, payload = excluded.payload",
+            params![
+                t.id.connection,
+                t.id.native,
+                t.key,
+                source_category_str(t.status_category),
+                t.rank,
+                t.updated_at,
+                t.removed_reason,
+                t.last_synced_ms,
+                payload,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Every stored ticket, newest-updated first (a stable display order the
+    /// client re-sorts as it likes).
+    pub fn load_tickets(&self) -> Result<Vec<Ticket>> {
+        let conn = self.conn.lock().unwrap();
+        let tickets = conn
+            .prepare("SELECT connection, native, removed_reason, payload FROM tickets ORDER BY updated_at DESC, native")?
+            .query_map([], |r| {
+                let connection: String = r.get(0)?;
+                let native: String = r.get(1)?;
+                let removed_reason: Option<String> = r.get(2)?;
+                let payload: String = r.get(3)?;
+                Ok(row_to_ticket(&connection, &native, removed_reason, &payload))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(tickets)
+    }
+
+    /// The display key ("AQ-123") of a ticket, for messages.
+    pub fn ticket_key(&self, id: &TicketId) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt =
+            conn.prepare("SELECT key FROM tickets WHERE connection = ?1 AND native = ?2")?;
+        let mut rows = stmt.query(params![id.connection, id.native])?;
+        Ok(rows.next()?.map(|r| r.get::<_, String>(0)).transpose()?)
+    }
+
+    /// The native ids currently tracked (not removed) on a connection — the
+    /// set a sync reconciles against so a ticket that left the assignment
+    /// scope is resolved individually rather than presumed deleted (PRD §8).
+    pub fn tracked_ticket_natives(&self, connection: &str) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let ids = conn
+            .prepare("SELECT native FROM tickets WHERE connection = ?1 AND removed_reason IS NULL")?
+            .query_map(params![connection], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(ids)
+    }
+
+    /// Flag a ticket as gone from the assignment scope with a reason, keeping
+    /// the row so the board can explain the absence rather than dropping it.
+    pub fn mark_ticket_removed(&self, id: &TicketId, reason: &str) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "UPDATE tickets SET removed_reason = ?3 WHERE connection = ?1 AND native = ?2",
+            params![id.connection, id.native, reason],
+        )?;
+        Ok(())
+    }
+
+    // ---- runs (a workflow execution on a ticket) ----
+    //
+    // A run links a ticket to the agent working it and carries the run's
+    // display state and any evidence the agent's `nebula stage` report captured.
+    // The agent id, evidence badges and completion summary ride in the
+    // `payload` JSON so the schema stays the migration-28 shape; the `state`
+    // column is the authority for the run's workflow state.
+
+    /// Record that a run has started on a ticket, driven by `agent_id`.
+    /// Returns the new run id.
+    pub fn start_run(&self, id: &TicketId, agent_id: &AgentId) -> Result<String> {
+        let run_id = nebula_core::ids::AgentId::generate().to_string();
+        let payload = serde_json::json!({ "agent_id": agent_id.as_str() }).to_string();
+        let now = now_ms();
+        self.conn.lock().unwrap().execute(
+            "INSERT INTO runs (id, connection, native, policy, state, payload, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 'implementation_only', 'running', ?4, ?5, ?5)",
+            params![run_id, id.connection, id.native, payload, now],
+        )?;
+        Ok(run_id)
+    }
+
+    /// Boot reconciliation: any run left `running` when the daemon died can no
+    /// longer be proven live, so mark it `interrupted` (execution-plan F2.7).
+    /// Never silently respawns a writer; resume/retry stays an explicit user
+    /// action. Returns how many runs it interrupted.
+    pub fn interrupt_running_runs(&self) -> Result<usize> {
+        let n = self.conn.lock().unwrap().execute(
+            "UPDATE runs SET state = 'interrupted', updated_at = ?1 WHERE state = 'running'",
+            params![now_ms()],
+        )?;
+        Ok(n)
+    }
+
+    /// Set the latest run's state for a ticket (cancel from the board), and
+    /// return that run. `None` when the ticket has no run.
+    pub fn set_latest_run_state(&self, id: &TicketId, state: &str) -> Result<Option<RunRow>> {
+        let conn = self.conn.lock().unwrap();
+        let found: Option<(String, String)> = conn
+            .query_row(
+                "SELECT id, payload FROM runs WHERE connection = ?1 AND native = ?2
+                 ORDER BY created_at DESC LIMIT 1",
+                params![id.connection, id.native],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                e => Err(e),
+            })?;
+        let Some((run_id, payload)) = found else {
+            return Ok(None);
+        };
+        conn.execute(
+            "UPDATE runs SET state = ?2, updated_at = ?3 WHERE id = ?1",
+            params![run_id, state, now_ms()],
+        )?;
+        Ok(Some(row_to_run(
+            run_id,
+            id.connection.clone(),
+            id.native.clone(),
+            state.into(),
+            payload,
+        )))
+    }
+
+    /// Append one evidence badge to a ticket's latest run (a check result that
+    /// landed after the stage report). Replaces any earlier badge of the same
+    /// kind so the current revision's result is the one shown. Returns the run.
+    pub fn add_run_evidence(
+        &self,
+        id: &TicketId,
+        badge: &nebula_core::ext::EvidenceBadge,
+    ) -> Result<Option<RunRow>> {
+        let conn = self.conn.lock().unwrap();
+        let found: Option<(String, String)> = conn
+            .query_row(
+                "SELECT id, payload FROM runs WHERE connection = ?1 AND native = ?2
+                 ORDER BY created_at DESC LIMIT 1",
+                params![id.connection, id.native],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                e => Err(e),
+            })?;
+        let Some((run_id, payload)) = found else {
+            return Ok(None);
+        };
+        let mut obj: serde_json::Value =
+            serde_json::from_str(&payload).unwrap_or_else(|_| serde_json::json!({}));
+        let mut evidence: Vec<nebula_core::ext::EvidenceBadge> = obj
+            .get("evidence")
+            .and_then(|e| serde_json::from_value(e.clone()).ok())
+            .unwrap_or_default();
+        evidence.retain(|b| b.kind != badge.kind);
+        evidence.push(badge.clone());
+        obj["evidence"] = serde_json::to_value(&evidence).unwrap_or(serde_json::json!([]));
+        let new_payload = obj.to_string();
+        let state: String = conn.query_row(
+            "SELECT state FROM runs WHERE id = ?1",
+            params![run_id],
+            |r| r.get(0),
+        )?;
+        conn.execute(
+            "UPDATE runs SET payload = ?2, updated_at = ?3 WHERE id = ?1",
+            params![run_id, new_payload, now_ms()],
+        )?;
+        Ok(Some(row_to_run(
+            run_id,
+            id.connection.clone(),
+            id.native.clone(),
+            state,
+            new_payload,
+        )))
+    }
+
+    /// Enqueue a run for a ticket without launching an agent yet (a batch that
+    /// exceeds the concurrency limit). Returns the new run id, or `None` when
+    /// the ticket already has an active run (running or queued) — a ticket is
+    /// never double-queued. The scheduler dispatches queued runs as slots free.
+    pub fn enqueue_run(&self, id: &TicketId) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let latest_state: Option<String> = conn
+            .query_row(
+                "SELECT state FROM runs WHERE connection = ?1 AND native = ?2
+                 ORDER BY created_at DESC LIMIT 1",
+                params![id.connection, id.native],
+                |r| r.get(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                e => Err(e),
+            })?;
+        if matches!(latest_state.as_deref(), Some("running") | Some("queued")) {
+            return Ok(None);
+        }
+        let run_id = nebula_core::ids::AgentId::generate().to_string();
+        let now = now_ms();
+        conn.execute(
+            "INSERT INTO runs (id, connection, native, policy, state, payload, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 'implementation_only', 'queued', '{}', ?4, ?4)",
+            params![run_id, id.connection, id.native, now],
+        )?;
+        Ok(Some(run_id))
+    }
+
+    /// The queued runs awaiting a dispatch slot, oldest first.
+    pub fn queued_runs(&self) -> Result<Vec<(String, TicketId)>> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn
+            .prepare(
+                "SELECT id, connection, native FROM runs WHERE state = 'queued' \
+                 ORDER BY created_at, rowid",
+            )?
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    TicketId::new(r.get::<_, String>(1)?, r.get::<_, String>(2)?),
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// The runs currently in the `running` state, with their agent id — the
+    /// scheduler counts the ones whose agent is still alive toward the limit.
+    pub fn running_runs(&self) -> Result<Vec<(TicketId, Option<AgentId>)>> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn
+            .prepare("SELECT connection, native, payload FROM runs WHERE state = 'running'")?
+            .query_map([], |r| {
+                let connection: String = r.get(0)?;
+                let native: String = r.get(1)?;
+                let payload: String = r.get(2)?;
+                let agent = serde_json::from_str::<serde_json::Value>(&payload)
+                    .ok()
+                    .and_then(|v| {
+                        v.get("agent_id")
+                            .and_then(|a| a.as_str())
+                            .map(|s| AgentId(s.to_string()))
+                    });
+                Ok((TicketId::new(connection, native), agent))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Activate a queued run: attach its agent and move it to `running`.
+    pub fn activate_run(&self, run_id: &str, agent_id: &AgentId) -> Result<()> {
+        let payload = serde_json::json!({ "agent_id": agent_id.as_str() }).to_string();
+        self.conn.lock().unwrap().execute(
+            "UPDATE runs SET state = 'running', payload = ?2, updated_at = ?3 WHERE id = ?1",
+            params![run_id, payload, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// Record the review agent on a ticket's latest run, so its `nebula stage`
+    /// verdict is recognised as a review rather than an implementation report.
+    pub fn set_review_agent(&self, id: &TicketId, agent_id: &AgentId) -> Result<Option<RunRow>> {
+        let conn = self.conn.lock().unwrap();
+        let found: Option<(String, String, String)> = conn
+            .query_row(
+                "SELECT id, state, payload FROM runs WHERE connection = ?1 AND native = ?2
+                 ORDER BY created_at DESC LIMIT 1",
+                params![id.connection, id.native],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                e => Err(e),
+            })?;
+        let Some((run_id, state, payload)) = found else {
+            return Ok(None);
+        };
+        let mut obj: serde_json::Value =
+            serde_json::from_str(&payload).unwrap_or_else(|_| serde_json::json!({}));
+        obj["review_agent_id"] = serde_json::json!(agent_id.as_str());
+        let new_payload = obj.to_string();
+        conn.execute(
+            "UPDATE runs SET payload = ?2, updated_at = ?3 WHERE id = ?1",
+            params![run_id, new_payload, now_ms()],
+        )?;
+        Ok(Some(row_to_run(
+            run_id,
+            id.connection.clone(),
+            id.native.clone(),
+            state,
+            new_payload,
+        )))
+    }
+
+    /// Which role `agent_id` plays on a run, if any — the run's implementer
+    /// (the `agent_id` in its payload) or its reviewer (`review_agent_id`), so
+    /// a `nebula stage` report is routed to the right stage.
+    pub fn run_role_for_agent(&self, agent_id: &AgentId) -> Result<Option<(TicketId, AgentRole)>> {
+        let conn = self.conn.lock().unwrap();
+        let rows: Vec<(String, String, String)> = conn
+            .prepare("SELECT connection, native, payload FROM runs ORDER BY created_at DESC")?
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (connection, native, payload) in rows {
+            let obj: serde_json::Value =
+                serde_json::from_str(&payload).unwrap_or(serde_json::Value::Null);
+            let implementer = obj.get("agent_id").and_then(|a| a.as_str());
+            let reviewer = obj.get("review_agent_id").and_then(|a| a.as_str());
+            if implementer == Some(agent_id.as_str()) {
+                return Ok(Some((
+                    TicketId::new(connection, native),
+                    AgentRole::Implement,
+                )));
+            }
+            if reviewer == Some(agent_id.as_str()) {
+                return Ok(Some((TicketId::new(connection, native), AgentRole::Review)));
+            }
+        }
+        Ok(None)
+    }
+
+    /// The latest run per ticket — the join the board uses to overlay live
+    /// workflow state and evidence onto a synced ticket.
+    pub fn latest_runs(&self) -> Result<Vec<RunRow>> {
+        let conn = self.conn.lock().unwrap();
+        // One row per (connection, native): the newest by created_at.
+        let rows = conn
+            .prepare(
+                "SELECT id, connection, native, state, payload FROM runs r
+                 WHERE created_at = (
+                   SELECT MAX(created_at) FROM runs r2
+                   WHERE r2.connection = r.connection AND r2.native = r.native
+                 )",
+            )?
+            .query_map([], |r| {
+                Ok(row_to_run(
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Apply an agent's `nebula stage` report to its latest run: set the run
+    /// state and merge the completion summary and any evidence into the payload.
+    /// Returns the run it updated (with the ticket it is on), or `None` when the
+    /// agent has no run. `first report wins` is not enforced here — a later
+    /// report is a fresh, deliberate update.
+    pub fn report_run_for_agent(
+        &self,
+        agent_id: &AgentId,
+        state: &str,
+        summary: &str,
+        evidence: &[nebula_core::ext::EvidenceBadge],
+    ) -> Result<Option<RunRow>> {
+        let conn = self.conn.lock().unwrap();
+        // Find the agent's latest run.
+        let found: Option<(String, String, String, String)> = conn
+            .query_row(
+                "SELECT id, connection, native, payload FROM runs
+                 WHERE payload LIKE '%' || ?1 || '%'
+                 ORDER BY created_at DESC LIMIT 1",
+                params![agent_id.as_str()],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                e => Err(e),
+            })?;
+        let Some((run_id, connection, native, payload)) = found else {
+            return Ok(None);
+        };
+        // Merge the report into the payload JSON.
+        let mut obj: serde_json::Value =
+            serde_json::from_str(&payload).unwrap_or_else(|_| serde_json::json!({}));
+        obj["summary"] = serde_json::json!(summary);
+        obj["evidence"] = serde_json::to_value(evidence).unwrap_or(serde_json::json!([]));
+        let new_payload = obj.to_string();
+        conn.execute(
+            "UPDATE runs SET state = ?2, payload = ?3, updated_at = ?4 WHERE id = ?1",
+            params![run_id, state, new_payload, now_ms()],
+        )?;
+        Ok(Some(row_to_run(
+            run_id,
+            connection,
+            native,
+            state.into(),
+            new_payload,
+        )))
+    }
+
+    // ---- durable inbox ----
+
+    /// Insert an inbox event, ignoring a duplicate `dedupe_key` (so a retry or
+    /// a re-broadcast never lands twice — PRD §10). Returns whether it was new.
+    pub fn insert_inbox_event(&self, ev: &nebula_core::ext::InboxEvent) -> Result<bool> {
+        let (connection, native) = ev
+            .ticket
+            .as_ref()
+            .map(|t| (Some(t.connection.clone()), Some(t.native.clone())))
+            .unwrap_or((None, None));
+        let payload = serde_json::to_string(ev)?;
+        let n = self.conn.lock().unwrap().execute(
+            "INSERT OR IGNORE INTO inbox_events (dedupe_key, kind, connection, native, payload, created_ms, read_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                ev.dedupe_key,
+                ev.kind,
+                connection,
+                native,
+                payload,
+                ev.created_ms,
+                ev.read_ms,
+            ],
+        )?;
+        Ok(n == 1)
+    }
+
+    /// The inbox, newest first.
+    pub fn load_inbox(&self) -> Result<Vec<nebula_core::ext::InboxEvent>> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn
+            .prepare(
+                "SELECT payload, read_ms FROM inbox_events ORDER BY created_ms DESC, dedupe_key",
+            )?
+            .query_map([], |r| {
+                let payload: String = r.get(0)?;
+                let read_ms: Option<i64> = r.get(1)?;
+                let mut ev: nebula_core::ext::InboxEvent =
+                    serde_json::from_str(&payload).unwrap_or_default();
+                // The column is authoritative for read state (updated in place).
+                ev.read_ms = read_ms;
+                Ok(ev)
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Mark one inbox event read locally (never resolves a provider thread —
+    /// PRD §10). Returns whether it flipped from unread.
+    pub fn mark_inbox_read(&self, dedupe_key: &str) -> Result<bool> {
+        let n = self.conn.lock().unwrap().execute(
+            "UPDATE inbox_events SET read_ms = ?2 WHERE dedupe_key = ?1 AND read_ms IS NULL",
+            params![dedupe_key, now_ms()],
+        )?;
+        Ok(n == 1)
+    }
+
+    // ---- provider connections ----
+
+    /// Insert or update a connection's non-secret identity/health.
+    pub fn upsert_connection(&self, c: &ConnectionStatus) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "INSERT INTO connections (id, kind, label, base_url, account, config, health, detail, last_sync_ms, created_at)
+             VALUES (?1, ?2, ?3, '', '', '{}', ?4, ?5, ?6, ?7)
+             ON CONFLICT(id) DO UPDATE SET
+               kind = excluded.kind, label = excluded.label,
+               health = excluded.health, detail = excluded.detail,
+               last_sync_ms = excluded.last_sync_ms",
+            params![
+                c.id,
+                c.kind,
+                c.label,
+                connection_health_str(c.health),
+                c.detail,
+                c.last_sync_ms,
+                now_ms(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_connections(&self) -> Result<Vec<ConnectionStatus>> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn
+            .prepare(
+                "SELECT id, kind, label, health, detail, last_sync_ms FROM connections ORDER BY created_at, id",
+            )?
+            .query_map([], |r| {
+                Ok(ConnectionStatus {
+                    id: r.get(0)?,
+                    kind: r.get(1)?,
+                    label: r.get(2)?,
+                    health: parse_connection_health(&r.get::<_, String>(3)?),
+                    detail: r.get(4)?,
+                    last_sync_ms: r.get(5)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     // ---- point lookups ----
 
     pub fn get_project(&self, id: &ProjectId) -> Result<Option<Project>> {
@@ -1171,6 +1848,104 @@ fn row_to_link(r: &rusqlite::Row) -> rusqlite::Result<Link> {
         url: r.get(2)?,
         sort_order: r.get(3)?,
     })
+}
+
+/// A stored ticket row back into a `Ticket`: the JSON payload is the source of
+/// truth for the ticket's content, and its `id` is re-stamped from the key
+/// columns so a payload that somehow disagrees can't hand back a mis-keyed
+/// ticket. The `removed_reason` *column* is authoritative for removal state —
+/// it is updated in place by `mark_ticket_removed` without rewriting the
+/// payload, so the column overrides whatever the (older) payload holds. A
+/// payload that will not parse (a newer build wrote it, a hand edit) degrades
+/// to a minimal ticket from the columns rather than dropping the row.
+fn row_to_ticket(
+    connection: &str,
+    native: &str,
+    removed_reason: Option<String>,
+    payload: &str,
+) -> Ticket {
+    let mut ticket: Ticket = serde_json::from_str(payload).unwrap_or_default();
+    ticket.id = TicketId::new(connection, native);
+    ticket.removed_reason = removed_reason;
+    ticket
+}
+
+/// Which stage an agent is running on a ticket's run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentRole {
+    Implement,
+    Review,
+}
+
+/// A run row as the board reads it: identity, the ticket it is on, the agent
+/// driving it, the authoritative workflow `state` (the column), and the
+/// evidence + summary the agent's report merged into the payload.
+#[derive(Debug, Clone)]
+pub struct RunRow {
+    pub id: String,
+    pub ticket: TicketId,
+    pub agent_id: Option<AgentId>,
+    pub state: String,
+    pub summary: Option<String>,
+    pub evidence: Vec<nebula_core::ext::EvidenceBadge>,
+}
+
+fn row_to_run(
+    id: String,
+    connection: String,
+    native: String,
+    state: String,
+    payload: String,
+) -> RunRow {
+    let obj: serde_json::Value = serde_json::from_str(&payload).unwrap_or(serde_json::Value::Null);
+    let agent_id = obj
+        .get("agent_id")
+        .and_then(|a| a.as_str())
+        .map(|s| AgentId(s.to_string()));
+    let summary = obj
+        .get("summary")
+        .and_then(|s| s.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let evidence = obj
+        .get("evidence")
+        .and_then(|e| serde_json::from_value(e.clone()).ok())
+        .unwrap_or_default();
+    RunRow {
+        id,
+        ticket: TicketId::new(connection, native),
+        agent_id,
+        state,
+        summary,
+        evidence,
+    }
+}
+
+fn source_category_str(c: SourceCategory) -> &'static str {
+    match c {
+        SourceCategory::ToDo => "to_do",
+        SourceCategory::InProgress => "in_progress",
+        SourceCategory::Done => "done",
+        SourceCategory::Unknown => "unknown",
+    }
+}
+
+fn connection_health_str(h: ConnectionHealth) -> &'static str {
+    match h {
+        ConnectionHealth::Configured => "configured",
+        ConnectionHealth::Authenticated => "authenticated",
+        ConnectionHealth::Verified => "verified",
+        ConnectionHealth::Error => "error",
+    }
+}
+
+fn parse_connection_health(raw: &str) -> ConnectionHealth {
+    match raw {
+        "authenticated" => ConnectionHealth::Authenticated,
+        "verified" => ConnectionHealth::Verified,
+        "error" => ConnectionHealth::Error,
+        _ => ConnectionHealth::Configured,
+    }
 }
 
 #[cfg(test)]

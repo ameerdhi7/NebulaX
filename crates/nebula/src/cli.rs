@@ -179,6 +179,23 @@ pub(crate) enum Command {
         #[arg(required = true, num_args = 1.., value_name = "FILE")]
         files: Vec<String>,
     },
+    /// Report a ticket run's outcome from inside its session.
+    ///
+    /// Run from inside an agent session started on a ticket from the board.
+    /// `done` marks the implementation complete — the daemon captures the diff
+    /// as evidence and the ticket becomes Ready — while `needs-input`,
+    /// `blocked` and `failed` say the run stopped short and why. Completion is
+    /// never inferred from the session ending, so an agent that finishes
+    /// without running this leaves the card asking for input.
+    #[command(after_help = STAGE_EXAMPLES)]
+    Stage {
+        /// The outcome: done, needs-input, blocked, or failed.
+        #[arg(value_name = "STATUS")]
+        status: String,
+        /// A one-line note on what happened, shown on the card.
+        #[arg(long, value_name = "TEXT")]
+        summary: Option<String>,
+    },
     /// Manage workspaces — named groups of projects.
     ///
     /// Each nebula instance has exactly one workspace open and scopes its
@@ -242,6 +259,25 @@ pub(crate) enum Command {
         ///
         /// For a machine with no desktop to open it on — `nebula tunnel` runs
         /// the remote half this way.
+        #[arg(long)]
+        no_open: bool,
+    },
+    /// Serve the Jira ticket board as a web dashboard.
+    ///
+    /// Runs a small bridge that holds its own connection to the daemon and
+    /// serves the board in a browser — a native web view, not the terminal in
+    /// a tab like `nebula browser`. It listens on loopback unless --bind
+    /// widens it; each tab drives the same daemon the TUI does.
+    #[command(after_help = WEB_EXAMPLES)]
+    Web {
+        /// Port to listen on (default 7690).
+        #[arg(long, default_value_t = 7690)]
+        port: u16,
+        /// Address to listen on (default 127.0.0.1). A non-loopback bind
+        /// serves your board to the network — put access control in front.
+        #[arg(long, value_name = "ADDR")]
+        bind: Option<std::net::IpAddr>,
+        /// Serve the URL but do not open a desktop browser.
         #[arg(long)]
         no_open: bool,
     },
@@ -367,6 +403,13 @@ Examples:
   nebula open README.md                one tab
   nebula open src/main.rs docs/keys.md a tab each, in this order";
 
+const STAGE_EXAMPLES: &str = "\
+Examples:
+  nebula stage done                        implementation complete → Ready
+  nebula stage done --summary \"added the sync loop and tests\"
+  nebula stage needs-input --summary \"which base branch should I target?\"
+  nebula stage failed --summary \"the repo has no build for this crate\"";
+
 const WORKSPACE_EXAMPLES: &str = "\
 Examples:
   nebula workspace add client-work   create one
@@ -381,6 +424,13 @@ Examples:
   nebula browser --no-open         serve only; print the URL
   nebula browser --public --credential me:secret
                                    reachable off-box, behind basic auth";
+
+const WEB_EXAMPLES: &str = "\
+Examples:
+  nebula web                       serve the board on 127.0.0.1:7690, open a tab
+  nebula web --port 8090           take a specific port
+  nebula web --bind 0.0.0.0 --no-open
+                                   serve to the network (guard the port yourself)";
 
 const SSH_EXAMPLES: &str = "\
 Examples:

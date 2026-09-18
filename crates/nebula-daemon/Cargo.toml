@@ -25,5 +25,10 @@ rand = "0.10"
 subtle = "2"
 tempfile = "3"
 vt100 = "0.16"
+# Outbound HTTP for provider adapters (Jira/Bitbucket). rustls, not OpenSSL,
+# so the musl release targets stay buildable (execution-plan D2). This tree is
+# the only place the daemon makes network calls.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+async-trait = "0.1"
 
 [dev-dependencies]

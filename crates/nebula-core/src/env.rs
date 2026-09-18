@@ -30,6 +30,8 @@ pub const AGENT_CMD: &str = "NEBULA_AGENT_CMD";
 pub const IDLE_REAP_MS: &str = "NEBULA_IDLE_REAP_MS";
 /// External-worktree sync probe period in ms; tests shorten it.
 pub const WORKTREE_SYNC_MS: &str = "NEBULA_WORKTREE_SYNC_MS";
+/// Provider (Jira) sync-beat period in ms (default 60s); tests shorten it.
+pub const TRACKER_SYNC_MS: &str = "NEBULA_TRACKER_SYNC_MS";
 /// How long a WORKTREE HOOK may run before the daemon kills it, in ms
 /// (default 30s); tests shorten it.
 pub const HOOK_TIMEOUT_MS: &str = "NEBULA_HOOK_TIMEOUT_MS";

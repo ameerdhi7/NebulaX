@@ -1873,6 +1873,7 @@ fn draw_overlay(f: &mut Frame, app: &mut App) {
             crate::preset_overlays::draw_editor(f, app, &editor, th)
         }
         Overlay::Issues(view) => crate::issues::draw(f, app, &view, th),
+        Overlay::Tickets(view) => crate::tickets::draw(f, app, &view, th),
         Overlay::BranchSwitch(view) => crate::branch_switch::draw(f, app, &view, th),
         Overlay::FileTabs(mut view) => {
             // The TREE BROWSER's footprint: the editor Enter opens wants the

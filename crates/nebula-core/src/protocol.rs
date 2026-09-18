@@ -8,7 +8,12 @@ use std::path::PathBuf;
 
 /// Bump on any breaking change to these enums. The daemon refuses mismatched
 /// clients; the client then offers a kill-and-restart of the old daemon.
-pub const PROTOCOL_VERSION: u32 = 40;
+///
+/// 40 → 41: added the `Ext { kind, json }` envelope on `ClientRequest` and
+/// `ServerEvent` (the Jira-agentic feature's whole vocabulary rides inside it
+/// as JSON — see `ext.rs` and execution-plan D1). Taken once, early, so the
+/// feature's later message evolution never bumps this again.
+pub const PROTOCOL_VERSION: u32 = 41;
 
 /// Max IPC frame size (length prefix sanity bound).
 pub const MAX_FRAME_LEN: u32 = 4 * 1024 * 1024;
@@ -392,6 +397,20 @@ pub enum ClientRequest {
     },
 
     Shutdown,
+
+    /// The Jira-agentic feature's envelope (execution-plan D1): a namespaced
+    /// `kind` (see `ext::kinds`) and a JSON `json` body (an `ext` payload
+    /// type). The daemon routes on `kind`; an unknown one is answered with
+    /// `Error`. `req_id` lets an action be acknowledged with `Ack`; a
+    /// fire-and-forget action sends `req_id: 0` and expects no reply. Kept as
+    /// one variant so the whole feature's later evolution stays in JSON and
+    /// never bumps `PROTOCOL_VERSION` again.
+    Ext {
+        req_id: u64,
+        kind: String,
+        #[serde(with = "serde_bytes")]
+        json: Vec<u8>,
+    },
 }
 
 /// How much of a pull request's conversation the user had already seen the
@@ -557,5 +576,18 @@ pub enum ServerEvent {
     Metrics {
         req_id: u64,
         snapshot: MetricsSnapshot,
+    },
+
+    /// The Jira-agentic feature's envelope (execution-plan D1). Carries both
+    /// the pushed ticket/run/evidence/inbox deltas (`req_id: None`, sent to
+    /// every subscriber) and the reply to an `Ext` action (`req_id: Some`).
+    /// A client matches on `kind` (see `ext::kinds`) and ignores any it does
+    /// not know, so a newer daemon can push new payload kinds to an older
+    /// client harmlessly.
+    Ext {
+        req_id: Option<u64>,
+        kind: String,
+        #[serde(with = "serde_bytes")]
+        json: Vec<u8>,
     },
 }

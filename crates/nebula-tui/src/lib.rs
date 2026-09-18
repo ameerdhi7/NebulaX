@@ -37,6 +37,7 @@ pub mod splash;
 pub mod syntax;
 pub mod text_input;
 pub mod theme;
+pub mod tickets;
 pub mod tree_browser;
 pub mod ui;
 pub mod update_check;
@@ -104,6 +105,12 @@ pub fn run_open(files: Vec<String>) -> Result<()> {
 /// `kind` is the CLI's `--kind`, already parsed where the flag is.
 pub fn run_spawn(task: String, kind: Option<nebula_core::AgentKind>) -> Result<()> {
     runtime()?.block_on(ipc::spawn_sibling_for_current_agent(&task, kind))
+}
+
+/// `nebula stage <status> [--summary <text>]` — report a ticket run's outcome
+/// from inside its agent session (see `ipc::stage_current_agent`).
+pub fn run_stage(status: String, summary: Option<String>) -> Result<()> {
+    runtime()?.block_on(ipc::stage_current_agent(&status, summary.as_deref()))
 }
 
 /// `nebula add <dir>` / bare `nebula <dir>` — register a directory as a

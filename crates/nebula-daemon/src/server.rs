@@ -119,6 +119,11 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                         }
                     }
                     let _ = out_tx.send(snapshot).await;
+                    // The ticket-side snapshot follows the entity one, as its
+                    // own ext event — the Jira-agentic feature's state, which a
+                    // client that doesn't know the `tickets/snapshot` kind
+                    // simply ignores (execution-plan D1/D3).
+                    let _ = out_tx.send(daemon.ticket_snapshot()).await;
                     let mut rx = daemon.events.subscribe();
                     let tx = out_tx.clone();
                     tokio::spawn(async move {
@@ -611,6 +616,9 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                 ClientRequest::StopRun { req_id, worktree } => {
                     reply_done(&out_tx, req_id, daemon.stop_run(&worktree)).await;
                 }
+                ClientRequest::Ext { req_id, kind, json } => {
+                    handle_ext(&daemon, &out_tx, req_id, &kind, &json).await;
+                }
             }
         }
         Ok(())
@@ -624,6 +632,216 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
     drop(out_tx);
     let _ = writer_task.await;
     result
+}
+
+/// Route one `Ext` envelope on its namespaced `kind` (execution-plan D1). The
+/// board actions the daemon understands are handled here; an unknown kind is
+/// answered with `Error` so a client learns its request went nowhere rather
+/// than waiting forever. A `req_id` of 0 marks a fire-and-forget action that
+/// wants no reply.
+async fn handle_ext(
+    daemon: &Arc<Daemon>,
+    out_tx: &mpsc::Sender<ServerEvent>,
+    req_id: u64,
+    kind: &str,
+    json: &[u8],
+) {
+    use nebula_core::ext::kinds;
+    match kind {
+        kinds::BOARD_START => {
+            // Start a workflow run on each named ticket (only the eligible
+            // ones actually launch; a blocked one errs). Off the request loop:
+            // cutting a worktree and spawning an agent takes seconds.
+            let start: nebula_core::ext::BoardStart = nebula_core::ext::decode(json);
+            let daemon = daemon.clone();
+            let out_tx = out_tx.clone();
+            tokio::spawn(async move {
+                // Enqueue the batch and dispatch up to the concurrency limit;
+                // blocked tickets come back as the error.
+                let result = daemon.start_batch(&start.tickets).await;
+                if req_id != 0 {
+                    match result {
+                        Ok(()) => {
+                            let _ = out_tx
+                                .send(ServerEvent::Ack {
+                                    req_id,
+                                    created: None,
+                                })
+                                .await;
+                        }
+                        Err(e) => {
+                            let _ = out_tx
+                                .send(ServerEvent::Error {
+                                    req_id: Some(req_id),
+                                    message: format!("{e:#}"),
+                                })
+                                .await;
+                        }
+                    }
+                }
+            });
+        }
+        kinds::STAGE_REPORT => {
+            // An agent's `nebula stage` report. Resolve the run and apply it;
+            // the resulting ticket delta streams to every subscriber.
+            let report: nebula_core::ext::StageReport = nebula_core::ext::decode(json);
+            let agent = nebula_core::AgentId(report.agent_id);
+            let result = daemon.report_stage(&agent, report.status, &report.summary);
+            if req_id != 0 {
+                match result {
+                    Ok(()) => {
+                        let _ = out_tx
+                            .send(ServerEvent::Ack {
+                                req_id,
+                                created: None,
+                            })
+                            .await;
+                    }
+                    Err(e) => {
+                        let _ = out_tx
+                            .send(ServerEvent::Error {
+                                req_id: Some(req_id),
+                                message: format!("{e:#}"),
+                            })
+                            .await;
+                    }
+                }
+            }
+        }
+        kinds::BOARD_CHANGES => {
+            // Capture the diff and reply with it as its own ext event (the
+            // client matches on the result kind, not the req_id). Off the loop:
+            // a git diff on a large repo takes a moment.
+            let req: nebula_core::ext::ChangesRequest = nebula_core::ext::decode(json);
+            let daemon = daemon.clone();
+            let out_tx = out_tx.clone();
+            tokio::spawn(async move {
+                let result = daemon.changes_for_ticket(&req.ticket);
+                let _ = out_tx
+                    .send(ServerEvent::Ext {
+                        req_id: (req_id != 0).then_some(req_id),
+                        kind: kinds::BOARD_CHANGES_RESULT.into(),
+                        json: nebula_core::ext::encode(&result),
+                    })
+                    .await;
+            });
+        }
+        kinds::BOARD_CANCEL => {
+            let target: nebula_core::ext::TicketTarget = nebula_core::ext::decode(json);
+            let result = match &target.ticket {
+                Some(id) => daemon.cancel_ticket(id),
+                None => Ok(()),
+            };
+            if req_id != 0 {
+                match result {
+                    Ok(()) => {
+                        let _ = out_tx
+                            .send(ServerEvent::Ack {
+                                req_id,
+                                created: None,
+                            })
+                            .await;
+                    }
+                    Err(e) => {
+                        let _ = out_tx
+                            .send(ServerEvent::Error {
+                                req_id: Some(req_id),
+                                message: format!("{e:#}"),
+                            })
+                            .await;
+                    }
+                }
+            }
+        }
+        kinds::BOARD_REVIEW => {
+            // Launch an independent review agent — off the request loop, since
+            // it cuts an agent session.
+            let target: nebula_core::ext::TicketTarget = nebula_core::ext::decode(json);
+            let daemon = daemon.clone();
+            let out_tx = out_tx.clone();
+            tokio::spawn(async move {
+                let result = match &target.ticket {
+                    Some(id) => daemon.start_review(id).await,
+                    None => Ok(()),
+                };
+                if req_id != 0 {
+                    match result {
+                        Ok(()) => {
+                            let _ = out_tx
+                                .send(ServerEvent::Ack {
+                                    req_id,
+                                    created: None,
+                                })
+                                .await;
+                        }
+                        Err(e) => {
+                            let _ = out_tx
+                                .send(ServerEvent::Error {
+                                    req_id: Some(req_id),
+                                    message: format!("{e:#}"),
+                                })
+                                .await;
+                        }
+                    }
+                }
+            });
+        }
+        kinds::REPORTS_REQUEST => {
+            // Compute a report and reply with it as its own ext event (the
+            // client matches on the summary kind, not the req_id).
+            let summary = daemon.report_summary();
+            let _ = out_tx
+                .send(ServerEvent::Ext {
+                    req_id: (req_id != 0).then_some(req_id),
+                    kind: kinds::REPORTS_SUMMARY.into(),
+                    json: nebula_core::ext::encode(&summary),
+                })
+                .await;
+        }
+        kinds::INBOX_MARK_READ => {
+            let req: nebula_core::ext::InboxMarkRead = nebula_core::ext::decode(json);
+            daemon.mark_inbox_read(&req.dedupe_key);
+            if req_id != 0 {
+                let _ = out_tx
+                    .send(ServerEvent::Ack {
+                        req_id,
+                        created: None,
+                    })
+                    .await;
+            }
+        }
+        kinds::BOARD_SYNC_NOW => {
+            // Force a provider sync now; the resulting ticket deltas stream to
+            // every subscriber as usual. Runs off the request loop so Input /
+            // Attach frames keep flowing while the network call is in flight.
+            let daemon = daemon.clone();
+            tokio::spawn(async move {
+                daemon.sync_now().await;
+            });
+            if req_id != 0 {
+                let _ = out_tx
+                    .send(ServerEvent::Ack {
+                        req_id,
+                        created: None,
+                    })
+                    .await;
+            }
+        }
+        // Board start/pause/cancel/retry and inbox mark-read land in phases 2
+        // and 5; until then they are declined explicitly rather than dropped.
+        other => {
+            if req_id != 0 {
+                let _ = out_tx
+                    .send(ServerEvent::Error {
+                        req_id: Some(req_id),
+                        message: format!("unsupported ext kind: {other}"),
+                    })
+                    .await;
+            } else {
+                tracing::debug!(kind = other, "ignoring fire-and-forget ext of unknown kind");
+            }
+        }
+    }
 }
 
 /// [`reply`] for the requests that create nothing: success is a bare Ack.

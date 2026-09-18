@@ -12,6 +12,7 @@ path = "src/main.rs"
 nebula-core = { workspace = true }
 nebula-daemon = { workspace = true }
 nebula-tui = { workspace = true }
+nebula-web = { workspace = true }
 anyhow = { workspace = true }
 clap = { version = "4", features = ["derive", "wrap_help"] }
 tokio = { workspace = true }

@@ -2320,6 +2320,7 @@ fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
         Action::AgentPresets => crate::preset_overlays::open_agent_presets(app),
         Action::QuickPrompt => crate::quick_prompt::open_quick_prompt(app),
         Action::Issues => crate::issues::open_issues(app),
+        Action::Tickets => crate::tickets::open(app),
         Action::SwitchBranch => crate::branch_switch::open_branch_switch(app),
         // Ctrl+→ still reaches the terminal pane (the counterpart of the
         // Ctrl+← escape hatch).
@@ -4504,6 +4505,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
         Overlay::AgentPresets(_) => crate::preset_overlays::handle_list_key(app, key, out),
         Overlay::AgentPresetEditor(_) => crate::preset_overlays::handle_editor_key(app, key),
         Overlay::Issues(_) => crate::issues::handle_key(app, key),
+        Overlay::Tickets(_) => crate::tickets::handle_key(app, key, out),
         Overlay::BranchSwitch(_) => crate::branch_switch::handle_key(app, key),
         Overlay::Menu(menu) => match key.code {
             // `?` (and `s` where no filter eats letters) on a row that
@@ -9065,6 +9067,15 @@ fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRe
             }
             app.flash = Some(message);
             app.dirty = true;
+        }
+        // The Jira-agentic feature's envelope (execution-plan D1): ticket /
+        // connection deltas the daemon streams. The board applies the ones it
+        // knows and ignores the rest, so a newer daemon can push new payload
+        // kinds harmlessly.
+        ServerEvent::Ext { kind, json, .. } => {
+            if crate::tickets::apply_ext(app, &kind, &json) {
+                app.dirty = true;
+            }
         }
         _ => {}
     }
@@ -31553,6 +31564,14 @@ diff --git a/src/c.rs b/src/c.rs
                 None,
             ),
             (
+                "Tickets",
+                |app| {
+                    seed_tree(app);
+                    crate::tickets::open(app);
+                },
+                None,
+            ),
+            (
                 "Hosts",
                 |app| {
                     app.overlay = Some(Overlay::Hosts(crate::app::HostsView::new(vec![
@@ -31723,6 +31742,7 @@ diff --git a/src/c.rs b/src/c.rs
             Overlay::AgentPresets(_) => "AgentPresets",
             Overlay::AgentPresetEditor(_) => "AgentPresetEditor",
             Overlay::Issues(_) => "Issues",
+            Overlay::Tickets(_) => "Tickets",
             Overlay::BranchSwitch(_) => "BranchSwitch",
         }
     }
@@ -31752,7 +31772,7 @@ diff --git a/src/c.rs b/src/c.rs
             let mut unique = seen.clone();
             unique.dedup();
             assert_eq!(unique, seen, "two rows for the same variant");
-            assert_eq!(seen.len(), 17, "a variant came or went: {seen:?}");
+            assert_eq!(seen.len(), 18, "a variant came or went: {seen:?}");
         });
     }
 

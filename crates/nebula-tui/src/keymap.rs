@@ -83,6 +83,9 @@ pub enum Action {
     /// place, commented on, with a QUICK PROMPT or an AGENT PRESET launched
     /// on one.
     Issues,
+    /// `Shift+J`: the TICKET BOARD — the Jira tickets assigned to you, synced
+    /// by the daemon and shown as cards.
+    Tickets,
     /// `c`: the BRANCH SWITCHER — move the project's ROOT WORKTREE onto
     /// another branch, asking what to do with uncommitted changes.
     SwitchBranch,
@@ -358,6 +361,15 @@ pub const ACTIONS: &[ActionSpec] = &[
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
         defaults: &["i"],
+    },
+    ActionSpec {
+        action: Action::Tickets,
+        id: "tickets",
+        label: "Ticket board",
+        hint: "The Jira tickets assigned to you, synced by the daemon; Tab cycles filters, r forces a sync",
+        group: "PROJECTS & WORKTREES",
+        scope: Scope::Global,
+        defaults: &["shift+j"],
     },
     ActionSpec {
         action: Action::SwitchBranch,

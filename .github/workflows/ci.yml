@@ -1,0 +1,50 @@
+name: CI
+
+# Build and test on every PR and on pushes to main. The repo had no
+# build-or-test workflow before the Jira-agentic feature (only release-on-tag
+# and the Claude review); execution-plan D9 lands one before the feature code so
+# a regression is caught in review rather than at release. `make ci` runs the
+# same gate locally.
+#
+# Clippy stays advisory: the workspace does not clear `-D warnings` today
+# (pre-existing lints in config.rs, ui.rs, hooks/mod.rs), so `make lint` is not
+# `-D warnings` and this workflow does not run clippy at all — matching the
+# Makefile's stance. Raise the bar with `make lint STRICT=1` when the tree is
+# clean.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+# One in-flight run per ref; a new push cancels the previous.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: fmt + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        run: rustup toolchain install stable --profile minimal --component rustfmt
+
+      - name: Cache cargo + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Test
+        run: cargo test --workspace

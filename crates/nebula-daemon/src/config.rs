@@ -56,6 +56,47 @@ pub struct Config {
     /// TUI's Project tab owns the map; the daemon reads the one key in it
     /// that is its to act on, through [`Config::run_command`].
     pub projects: BTreeMap<PathBuf, ProjectConfig>,
+    /// Provider connections (Jira today) — non-secret config only: id, kind,
+    /// label, base URL, account, JQL scope. From `config.json`. The token is
+    /// never here (execution-plan D7); see `secrets`.
+    pub connections: Vec<crate::providers::ConnectionConfig>,
+    /// Per-connection secrets, resolved through the settings layer so they
+    /// land only in `config.local.json` — the layer never exported, forwarded
+    /// or overwritten by an import. An env override
+    /// (`NEBULA_TOKEN_<connection-id>`, id upper-cased, non-alphanumerics to
+    /// `_`) wins when set, so CI and one-off runs need no file. Plaintext on
+    /// disk is an explicit accepted risk (D7); OS keychain is deferred.
+    pub secrets: Secrets,
+    /// Check commands run in a ticket's worktree when its agent reports done,
+    /// keyed by the repo path (like `projects`). Each command runs through the
+    /// login shell; all exiting 0 is a pass, any non-zero is a fail, none
+    /// configured is `skipped` — a skipped check is never a passed one (PRD §6).
+    pub checks: BTreeMap<PathBuf, Vec<String>>,
+    /// Workflow scheduling limits (PRD §7): how many tickets may run at once.
+    pub workflow: Workflow,
+}
+
+/// The `workflow` config key — batch scheduling limits.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct Workflow {
+    /// The most tickets that may have a live agent at once. A batch start
+    /// dispatches up to this many eligible tickets and queues the rest, filling
+    /// a slot each time a run finishes (PRD §7 default: two).
+    pub max_concurrent: usize,
+}
+
+impl Default for Workflow {
+    fn default() -> Self {
+        Self { max_concurrent: 2 }
+    }
+}
+
+/// The `secrets` config key — held only in the local layer (D7).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct Secrets {
+    pub connections: BTreeMap<String, crate::providers::Secret>,
 }
 
 /// One project's entry under `projects` — the rows of the TUI's Project
@@ -81,6 +122,10 @@ impl Default for Config {
             custom_harnesses: Vec::new(),
             harnesses: BTreeMap::new(),
             projects: BTreeMap::new(),
+            connections: Vec::new(),
+            secrets: Secrets::default(),
+            checks: BTreeMap::new(),
+            workflow: Workflow::default(),
         }
     }
 }
@@ -130,6 +175,62 @@ impl Config {
             .map(|p| p.run_command.trim())
             .filter(|c| !c.is_empty())
     }
+
+    /// The check commands configured for the repo at `repo_path`, trimmed and
+    /// non-empty; empty when the repo has none.
+    pub fn checks_for(&self, repo_path: &Path) -> Vec<String> {
+        self.checks
+            .get(repo_path)
+            .map(|cmds| {
+                cmds.iter()
+                    .map(|c| c.trim().to_string())
+                    .filter(|c| !c.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The provider roster for a sync beat: every configured connection joined
+    /// to its resolved secret. The env override
+    /// `NEBULA_TOKEN_<CONNECTION_ID>` (id upper-cased, non-alphanumerics → `_`)
+    /// wins over the file, so tests and CI need no `config.local.json`.
+    pub fn connection_roster(&self) -> crate::providers::Connections {
+        let mut secrets = std::collections::BTreeMap::new();
+        for cfg in &self.connections {
+            let mut secret = self
+                .secrets
+                .connections
+                .get(&cfg.id)
+                .cloned()
+                .unwrap_or_default();
+            if let Some(token) = env_token(&cfg.id) {
+                secret.token = token;
+            }
+            secrets.insert(cfg.id.clone(), secret);
+        }
+        crate::providers::Connections {
+            configs: self.connections.clone(),
+            secrets,
+        }
+    }
+}
+
+/// `NEBULA_TOKEN_<CONNECTION_ID>` — the connection id upper-cased with every
+/// non-alphanumeric byte mapped to `_`, so `aau-jira` reads `NEBULA_TOKEN_AAU_JIRA`.
+fn env_token(connection_id: &str) -> Option<String> {
+    let suffix: String = connection_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    std::env::var(format!("NEBULA_TOKEN_{suffix}"))
+        .ok()
+        .filter(|v| !v.is_empty())
 }
 
 /// "off"/"0" → Some(None); "<n>s"/"<n>m"/"<n>h" → Some(Some(d));

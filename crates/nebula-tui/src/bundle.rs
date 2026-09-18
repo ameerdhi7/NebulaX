@@ -135,6 +135,14 @@ pub fn export(paths: &Paths, scope: Scope) -> (Value, Vec<String>) {
             }
         }
     }
+    // Provider tokens belong in config.local.json, which is never exported.
+    // Strip a `secrets` key even if one somehow reached config.json, so an
+    // export or an `nebula ssh` forward can never carry a credential (D7).
+    if let Some(Value::Object(config)) = bundle.get_mut(CONFIG) {
+        if config.remove("secrets").is_some() {
+            warnings.push("left secrets out: credentials never leave this machine".into());
+        }
+    }
     (Value::Object(bundle), warnings)
 }
 
@@ -663,6 +671,43 @@ mod tests {
             "destinations as seen from here stay here"
         );
         assert_eq!(section_count(&remote), 2);
+    }
+
+    /// Provider tokens (the Jira/Bitbucket `secrets` key) never leave this
+    /// machine: config.local.json is never exported, and a `secrets` key that
+    /// somehow reached config.json is stripped from every scope (D7).
+    #[test]
+    fn an_export_never_carries_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = paths(dir.path());
+        // The proper home — config.local.json — is never exported at all.
+        put(
+            &p.local,
+            json!({"secrets": {"connections": {"jira": {"token": "SECRET-LOCAL"}}}}),
+        );
+        // And even a stray `secrets` in the portable config.json is stripped.
+        put(
+            &p.config,
+            json!({"theme": "ocean", "secrets": {"connections": {"jira": {"token": "SECRET-PORTABLE"}}}}),
+        );
+
+        for scope in [Scope::Backup, Scope::Remote] {
+            let (bundle, _) = export(&p, scope);
+            let text = bundle.to_string();
+            assert!(
+                !text.contains("SECRET-LOCAL"),
+                "local secret leaked ({scope:?})"
+            );
+            assert!(
+                !text.contains("SECRET-PORTABLE"),
+                "portable secret leaked ({scope:?})"
+            );
+            assert!(
+                bundle["config"].get("secrets").is_none(),
+                "secrets key stripped from config ({scope:?})"
+            );
+            assert_eq!(bundle["config"]["theme"], "ocean", "the rest survives");
+        }
     }
 
     #[test]
