@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>nubla x docs</title>
+<meta name="description" content="nubla x documentation — keys, commands, sessions, configuration, the Jira ticket board and how it works.">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+<style>
+  :root{
+    --bg:#0c0e13; --panel:#141824; --panel2:#191e2c; --line:#232838; --line2:#2c334a;
+    --fg:#e6e9ef; --dim:#8b93a7; --dim2:#5b6478; --gold:#e8c547; --blue:#6ea8fe;
+    --ok:#4ec9a5; --chip:#1e2432;
+    --mono:'JetBrains Mono',ui-monospace,Menlo,monospace; --sans:'Inter',system-ui,sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{background:var(--bg);color:var(--fg);font-family:var(--sans);line-height:1.65;-webkit-font-smoothing:antialiased}
+  a{color:var(--blue);text-decoration:none}
+  a:hover{text-decoration:underline}
+
+  header.nav{position:sticky;top:0;z-index:50;backdrop-filter:blur(12px);
+    background:rgba(12,14,19,.75);border-bottom:1px solid var(--line)}
+  .nav-in{display:flex;align-items:center;gap:18px;height:60px;max-width:1180px;margin:0 auto;padding:0 24px}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:800;font-size:18px;letter-spacing:-.02em;color:var(--fg)}
+  .brand .dot{width:10px;height:10px;border-radius:50%;background:var(--gold);box-shadow:0 0 12px var(--gold)}
+  .nav .spacer{flex:1}
+  .nav a.top{color:var(--dim);font-size:14.5px;font-weight:500}
+  .nav a.top:hover{color:var(--fg);text-decoration:none}
+  .menu-btn{display:none;background:var(--panel);border:1px solid var(--line2);color:var(--fg);
+    border-radius:8px;padding:7px 11px;font-size:14px;cursor:pointer}
+
+  .layout{display:grid;grid-template-columns:250px 1fr;max-width:1180px;margin:0 auto;gap:0}
+  aside{border-right:1px solid var(--line);padding:30px 18px;height:calc(100vh - 60px);
+    position:sticky;top:60px;overflow-y:auto}
+  aside .grp{font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:.13em;
+    color:var(--dim2);margin:0 10px 10px}
+  aside a{display:block;color:var(--dim);padding:9px 12px;border-radius:9px;font-size:14.5px;
+    font-weight:500;margin-bottom:2px}
+  aside a:hover{background:var(--panel);color:var(--fg);text-decoration:none}
+  aside a.active{background:var(--chip);color:var(--gold);border:1px solid var(--line2)}
+
+  main{padding:44px 48px 96px;min-width:0}
+  .md{max-width:760px}
+  .md h1{font-size:36px;letter-spacing:-.03em;margin:0 0 8px;font-weight:800}
+  .md h2{font-size:25px;letter-spacing:-.02em;margin:42px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--line);font-weight:700}
+  .md h3{font-size:19px;margin:30px 0 10px;font-weight:600}
+  .md p{margin:14px 0;color:#d3d8e2}
+  .md ul,.md ol{margin:14px 0;padding-left:24px;color:#d3d8e2}
+  .md li{margin:6px 0}
+  .md strong{color:var(--fg);font-weight:600}
+  .md code{font-family:var(--mono);font-size:13px;background:var(--chip);color:var(--gold);
+    padding:2px 6px;border-radius:5px}
+  .md pre{background:#080a0e;border:1px solid var(--line2);border-radius:12px;padding:18px 20px;
+    overflow-x:auto;margin:18px 0}
+  .md pre code{background:none;color:#d3d8e2;padding:0;font-size:13px;line-height:1.55}
+  .md blockquote{border-left:3px solid var(--gold);background:var(--panel);margin:18px 0;
+    padding:12px 18px;border-radius:0 10px 10px 0;color:var(--dim)}
+  .md blockquote p{margin:6px 0}
+  .md a{color:var(--blue)}
+  .md table{border-collapse:collapse;width:100%;margin:18px 0;font-size:14px;display:block;overflow-x:auto}
+  .md th,.md td{border:1px solid var(--line);padding:9px 13px;text-align:left}
+  .md th{background:var(--panel);font-weight:600}
+  .md tr:nth-child(even){background:rgba(255,255,255,.015)}
+  .md hr{border:none;border-top:1px solid var(--line);margin:32px 0}
+  .loading{color:var(--dim);font-family:var(--mono)}
+
+  @media(max-width:860px){
+    .layout{grid-template-columns:1fr}
+    aside{position:fixed;top:60px;left:0;width:270px;background:var(--bg);z-index:40;
+      transform:translateX(-100%);transition:.22s;border-right:1px solid var(--line2)}
+    aside.open{transform:translateX(0)}
+    main{padding:30px 22px 80px}
+    .menu-btn{display:inline-block}
+  }
+</style>
+</head>
+<body>
+
+<header class="nav">
+  <div class="nav-in">
+    <button class="menu-btn" onclick="document.getElementById('side').classList.toggle('open')">☰</button>
+    <a class="brand" href="index.html"><span class="dot"></span>nubla<span style="color:var(--gold)">&nbsp;x</span></a>
+    <div class="spacer"></div>
+    <a class="top" href="index.html">← Home</a>
+    <a class="top" href="https://github.com/ameerdhi7/NebulaX">GitHub</a>
+  </div>
+</header>
+
+<div class="layout">
+  <aside id="side">
+    <div class="grp">Guide</div>
+    <a data-doc="keys">Keys</a>
+    <a data-doc="commands">Commands</a>
+    <a data-doc="sessions">Sessions</a>
+    <a data-doc="configuration">Configuration</a>
+    <div class="grp" style="margin-top:22px">Workflow</div>
+    <a data-doc="jira-tickets">Jira ticket board</a>
+    <a data-doc="how-it-works">How it works</a>
+  </aside>
+  <main>
+    <article class="md" id="content"><p class="loading">Loading…</p></article>
+  </main>
+</div>
+
+<script>
+  const DOCS = {
+    'keys':'Keys','commands':'Commands','sessions':'Sessions',
+    'configuration':'Configuration','jira-tickets':'Jira ticket board','how-it-works':'How it works'
+  };
+  marked.setOptions({gfm:true, breaks:false});
+
+  function current(){
+    const p = new URLSearchParams(location.search).get('doc');
+    return DOCS[p] ? p : 'keys';
+  }
+  function setActive(doc){
+    document.querySelectorAll('aside a').forEach(a=>{
+      a.classList.toggle('active', a.dataset.doc===doc);
+    });
+    document.title = 'nubla x docs · ' + DOCS[doc];
+  }
+  async function load(doc){
+    setActive(doc);
+    const el = document.getElementById('content');
+    el.innerHTML = '<p class="loading">Loading…</p>';
+    try{
+      const res = await fetch('docs/'+doc+'.md');
+      if(!res.ok) throw new Error(res.status);
+      let md = await res.text();
+      // rewrite intra-doc .md links to the viewer
+      md = md.replace(/\]\((?:docs\/)?([a-z-]+)\.md(#[\w-]+)?\)/g,
+        (m,name,hash)=> DOCS[name] ? '](docs.html?doc='+name+(hash||'')+')' : m);
+      md = md.replace(/\]\((?:\.\.\/)?ARCHITECTURE\.md\)/g,
+        '](https://github.com/ameerdhi7/NebulaX/blob/main/ARCHITECTURE.md)');
+      el.innerHTML = marked.parse(md);
+      document.querySelector('main').scrollTo(0,0);
+      window.scrollTo(0,0);
+    }catch(e){
+      el.innerHTML = '<h1>Not found</h1><p>Could not load this page ('+e.message+').</p>';
+    }
+    document.getElementById('side').classList.remove('open');
+  }
+  document.querySelectorAll('aside a').forEach(a=>{
+    a.href = '?doc='+a.dataset.doc;
+    a.addEventListener('click', ev=>{
+      ev.preventDefault();
+      history.pushState({}, '', '?doc='+a.dataset.doc);
+      load(a.dataset.doc);
+    });
+  });
+  window.addEventListener('popstate', ()=>load(current()));
+  load(current());
+</script>
+</body>
+</html>

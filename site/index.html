@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>nubla x — mission control for your coding agents</title>
+<meta name="description" content="Run Claude Code, Codex, Cursor, Pi and Muse across every project and git worktree from one terminal. A ~4 MB Rust binary. Agents keep working when you close it.">
+<meta property="og:title" content="nubla x — mission control for your coding agents">
+<meta property="og:description" content="One tree, one keyboard, one daemon. Read the dots, not the screens.">
+<meta property="og:type" content="website">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0c0e13; --bg2:#0f1218; --panel:#141824; --panel2:#191e2c;
+    --line:#232838; --line2:#2c334a;
+    --fg:#e6e9ef; --dim:#8b93a7; --dim2:#5b6478;
+    --gold:#e8c547; --blue:#6ea8fe; --ok:#4ec9a5; --violet:#b99cf6;
+    --warn:#e0a852; --err:#e06c75; --mag:#e06cc4;
+    --chip:#1e2432; --radius:14px;
+    --mono:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+    --sans:'Inter',system-ui,-apple-system,sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{
+    background:var(--bg); color:var(--fg); font-family:var(--sans);
+    line-height:1.6; -webkit-font-smoothing:antialiased;
+    background-image:
+      radial-gradient(60rem 40rem at 80% -10%, rgba(110,168,254,.10), transparent 60%),
+      radial-gradient(50rem 40rem at 0% 5%, rgba(232,197,71,.07), transparent 55%);
+    background-attachment:fixed;
+  }
+  a{color:inherit;text-decoration:none}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 24px}
+  .mono{font-family:var(--mono)}
+
+  /* nav */
+  header.nav{position:sticky;top:0;z-index:50;backdrop-filter:blur(12px);
+    background:rgba(12,14,19,.72);border-bottom:1px solid var(--line)}
+  .nav-in{display:flex;align-items:center;gap:22px;height:62px}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:800;font-size:19px;letter-spacing:-.02em}
+  .brand .dot{width:11px;height:11px;border-radius:50%;background:var(--gold);
+    box-shadow:0 0 14px var(--gold)}
+  .nav a.link{color:var(--dim);font-size:14.5px;font-weight:500}
+  .nav a.link:hover{color:var(--fg)}
+  .nav .spacer{flex:1}
+  .nav .links{display:flex;gap:22px}
+  .btn{display:inline-flex;align-items:center;gap:8px;font-weight:600;font-size:14.5px;
+    padding:9px 16px;border-radius:10px;border:1px solid var(--line2);
+    background:var(--panel);transition:.15s;cursor:pointer}
+  .btn:hover{border-color:var(--dim2);transform:translateY(-1px)}
+  .btn.gold{background:linear-gradient(180deg,#f0d264,#e8c547);color:#1a1608;border-color:#e8c547}
+  .btn.gold:hover{box-shadow:0 6px 20px rgba(232,197,71,.28)}
+  @media(max-width:720px){.nav .links{display:none}}
+
+  /* hero */
+  .hero{padding:88px 0 40px;text-align:center}
+  .eyebrow{display:inline-flex;align-items:center;gap:9px;font-family:var(--mono);
+    font-size:12.5px;color:var(--dim);border:1px solid var(--line);
+    background:var(--panel);padding:6px 14px;border-radius:999px;margin-bottom:26px}
+  .eyebrow b{color:var(--gold);font-weight:600}
+  h1{font-size:clamp(38px,6vw,66px);line-height:1.02;letter-spacing:-.035em;font-weight:800}
+  h1 .grad{background:linear-gradient(120deg,var(--gold),var(--blue));
+    -webkit-background-clip:text;background-clip:text;color:transparent}
+  .sub{max-width:640px;margin:24px auto 0;color:var(--dim);font-size:19px}
+  .sub b{color:var(--fg);font-weight:600}
+  .cta{display:flex;gap:14px;justify-content:center;margin:34px 0 20px;flex-wrap:wrap}
+  .install{display:inline-flex;align-items:center;gap:12px;font-family:var(--mono);
+    font-size:14px;background:#080a0e;border:1px solid var(--line2);
+    border-radius:12px;padding:13px 18px;color:var(--fg);max-width:100%;overflow:auto}
+  .install .prompt{color:var(--gold)}
+  .install button{margin-left:6px;background:var(--chip);border:1px solid var(--line2);
+    color:var(--dim);font-family:var(--mono);font-size:12px;padding:4px 9px;
+    border-radius:7px;cursor:pointer;white-space:nowrap}
+  .install button:hover{color:var(--fg)}
+  .platform{margin-top:16px;color:var(--dim2);font-size:13px;font-family:var(--mono)}
+
+  /* shot */
+  .shot{margin:48px auto 0;max-width:1000px;position:relative}
+  .shot img{width:100%;border-radius:16px;border:1px solid var(--line2);
+    box-shadow:0 40px 90px -30px rgba(0,0,0,.8)}
+  .shot .glow{position:absolute;inset:-1px;border-radius:16px;pointer-events:none;
+    box-shadow:0 0 0 1px rgba(110,168,254,.15), inset 0 0 60px rgba(110,168,254,.04)}
+
+  /* section */
+  section{padding:72px 0}
+  .sec-head{text-align:center;margin-bottom:48px}
+  .sec-head .kick{font-family:var(--mono);font-size:13px;color:var(--gold);
+    text-transform:uppercase;letter-spacing:.14em;font-weight:600}
+  .sec-head h2{font-size:clamp(28px,4vw,40px);letter-spacing:-.03em;margin-top:12px;font-weight:800}
+  .sec-head p{color:var(--dim);max-width:600px;margin:14px auto 0;font-size:17px}
+
+  /* dots */
+  .dots{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px;margin-top:8px}
+  .dotcard{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 20px}
+  .dotcard .d{width:12px;height:12px;border-radius:50%;display:inline-block;margin-bottom:10px}
+  .dotcard b{display:block;font-size:15px;letter-spacing:-.01em}
+  .dotcard span{color:var(--dim);font-size:13.5px}
+
+  /* feature grid */
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:18px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+    padding:26px;transition:.18s}
+  .card:hover{border-color:var(--line2);transform:translateY(-2px);background:var(--panel2)}
+  .card .ic{width:42px;height:42px;border-radius:11px;display:grid;place-items:center;
+    font-size:21px;background:var(--chip);border:1px solid var(--line2);margin-bottom:16px}
+  .card h3{font-size:18px;letter-spacing:-.015em;margin-bottom:8px}
+  .card p{color:var(--dim);font-size:14.5px}
+  .card code{font-family:var(--mono);font-size:12.5px;background:var(--chip);
+    padding:1.5px 6px;border-radius:5px;color:var(--gold)}
+
+  /* jira split */
+  .split{display:grid;grid-template-columns:1fr 1fr;gap:44px;align-items:center}
+  @media(max-width:820px){.split{grid-template-columns:1fr;gap:28px}}
+  .split img{width:100%;border-radius:14px;border:1px solid var(--line2);
+    box-shadow:0 30px 70px -30px rgba(0,0,0,.75)}
+  .split h2{font-size:clamp(26px,4vw,38px);letter-spacing:-.03em;margin-bottom:16px;font-weight:800}
+  .split .kick{font-family:var(--mono);font-size:13px;color:var(--gold);
+    text-transform:uppercase;letter-spacing:.14em;font-weight:600}
+  .flist{margin-top:22px;display:flex;flex-direction:column;gap:14px}
+  .flist .row{display:flex;gap:12px;align-items:flex-start}
+  .flist .row .k{color:var(--ok);font-family:var(--mono);flex-shrink:0;margin-top:2px}
+  .flist .row b{font-weight:600}
+  .flist .row p{color:var(--dim);font-size:14.5px}
+
+  /* harnesses */
+  .harn{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:14px}
+  .harn .h{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    padding:20px;text-align:center}
+  .harn .h img{width:34px;height:34px;border-radius:8px;margin-bottom:10px}
+  .harn .h b{display:block;font-size:16px}
+  .harn .h span{font-family:var(--mono);font-size:12.5px;color:var(--gold)}
+
+  /* steps */
+  .steps{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:18px;counter-reset:s}
+  .step{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:24px;position:relative}
+  .step::before{counter-increment:s;content:counter(s);position:absolute;top:-14px;left:22px;
+    width:32px;height:32px;border-radius:9px;background:var(--gold);color:#1a1608;
+    font-weight:800;display:grid;place-items:center;font-family:var(--mono);font-size:15px}
+  .step h4{margin:10px 0 8px;font-size:16px}
+  .step p{color:var(--dim);font-size:14px}
+  .step code{font-family:var(--mono);font-size:12.5px;color:var(--gold)}
+
+  /* docs cta */
+  .docsband{background:linear-gradient(180deg,var(--panel),var(--bg2));
+    border:1px solid var(--line);border-radius:18px;padding:44px;text-align:center}
+  .docsgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-top:26px}
+  .docsgrid a{background:var(--bg);border:1px solid var(--line2);border-radius:11px;
+    padding:16px;text-align:left;transition:.15s}
+  .docsgrid a:hover{border-color:var(--gold);transform:translateY(-2px)}
+  .docsgrid a b{display:block;font-size:15px;margin-bottom:3px}
+  .docsgrid a span{color:var(--dim);font-size:13px}
+
+  /* footer */
+  footer{border-top:1px solid var(--line);padding:44px 0;margin-top:40px;color:var(--dim);font-size:14px}
+  .foot-in{display:flex;justify-content:space-between;align-items:center;gap:20px;flex-wrap:wrap}
+  footer a:hover{color:var(--fg)}
+  .foot-links{display:flex;gap:22px}
+  .pill{font-family:var(--mono);font-size:12px;color:var(--dim2);border:1px solid var(--line);
+    padding:3px 10px;border-radius:999px}
+</style>
+</head>
+<body>
+
+<header class="nav">
+  <div class="wrap nav-in">
+    <a class="brand" href="#top"><span class="dot"></span>nubla<span style="color:var(--gold)">&nbsp;x</span></a>
+    <div class="spacer"></div>
+    <nav class="links">
+      <a class="link" href="#features">Features</a>
+      <a class="link" href="#board">Ticket board</a>
+      <a class="link" href="#harnesses">Harnesses</a>
+      <a class="link" href="docs.html">Docs</a>
+      <a class="link" href="https://github.com/ameerdhi7/NebulaX">GitHub</a>
+    </nav>
+    <a class="btn gold" href="#install">Install</a>
+  </div>
+</header>
+
+<main id="top">
+  <section class="hero wrap">
+    <div class="eyebrow">One <b>~4 MB</b> Rust binary · no Electron · no browser · no server</div>
+    <h1>Mission control for<br>your <span class="grad">coding agents</span></h1>
+    <p class="sub">Run <b>Claude Code</b>, <b>Codex</b>, <b>Cursor</b>, <b>Pi</b> and <b>Muse</b> across every
+      project and git worktree you own — from one terminal, one keyboard, one tree.
+      They keep working when you close it.</p>
+    <div class="cta">
+      <a class="btn gold" href="#install">Get started</a>
+      <a class="btn" href="https://github.com/ameerdhi7/NebulaX">★ Star on GitHub</a>
+    </div>
+    <div class="install" id="install">
+      <span class="prompt">$</span>
+      <span class="mono" id="cmd">curl -fsSL https://raw.githubusercontent.com/ameerdhi7/NebulaX/main/install.sh | sh</span>
+      <button onclick="copyCmd(this)">copy</button>
+    </div>
+    <div class="platform">macOS &amp; Linux · same command installs and updates</div>
+    <div class="shot">
+      <img src="assets/screenshot.png" alt="nubla x: projects, worktrees and sessions on the left, a live Claude Code session on the right" loading="lazy">
+      <div class="glow"></div>
+    </div>
+  </section>
+
+  <!-- problem / dots -->
+  <section class="wrap" id="dots">
+    <div class="sec-head">
+      <div class="kick">Read the dots, not the screens</div>
+      <h2>Three agents, three tabs, and no idea which one needs you</h2>
+      <p>nubla x replaces the reading with a tree and a color. Every session carries a status dot;
+        every parent rolls up its children — so a red dot on a collapsed project tells you exactly where to look.</p>
+    </div>
+    <div class="dots">
+      <div class="dotcard"><span class="d" style="background:#8b93a7"></span><b>Fresh</b><span>agent never run</span></div>
+      <div class="dotcard"><span class="d" style="background:var(--warn)"></span><b>Running</b><span>turn in progress</span></div>
+      <div class="dotcard"><span class="d" style="background:var(--violet)"></span><b>Unseen</b><span>finished, nobody looked yet</span></div>
+      <div class="dotcard"><span class="d" style="background:var(--ok)"></span><b>Finished</b><span>done and read</span></div>
+      <div class="dotcard"><span class="d" style="background:var(--err)"></span><b>Needs feedback</b><span>waiting on you</span></div>
+      <div class="dotcard"><span class="d" style="background:var(--mag)"></span><b>Terminated</b><span>process died mid-run</span></div>
+    </div>
+  </section>
+
+  <!-- features -->
+  <section class="wrap" id="features">
+    <div class="sec-head">
+      <div class="kick">What you get</div>
+      <h2>One tree, up to four panels</h2>
+      <p>Projects → worktrees → sessions → terminal pane. <code>h/j/k/l</code> moves, <code>Enter</code> drills in,
+        and landing on a live pane hands it the keyboard.</p>
+    </div>
+    <div class="grid">
+      <div class="card"><div class="ic">🌳</div><h3>A daemon that owns the PTYs</h3>
+        <p>Quit the TUI, shut the laptop, come back tomorrow. The agents never stopped, and the scrollback ring is replayed on attach.</p></div>
+      <div class="card"><div class="ic">●</div><h3>Status dots you read instead of screens</h3>
+        <p>Yellow mid-turn, violet finished-and-unseen, green read, red waiting on you — plus a <code>n done</code> badge counting the terminals you still owe a look.</p></div>
+      <div class="card"><div class="ic">🔀</div><h3>Real git worktrees, one keystroke</h3>
+        <p><code>n</code> branches off into an actual <code>git worktree</code>. Two agents in two directories never collide, and a worktree hook can claim a port or route.</p></div>
+      <div class="card"><div class="ic">🎯</div><h3>Agents that drive nubla x back</h3>
+        <p>Tell a session <em>"do this in a worktree"</em> and it runs <code>nebula worktree</code>, then restarts itself resumed inside the new checkout.</p></div>
+      <div class="card"><div class="ic">🔧</div><h3>Every pull request &amp; issue, in place</h3>
+        <p>nubla x asks <code>gh</code> what's open. Read a PR under the cursor, <code>g</code> for its diff, <code>y</code> to comment, <code>n</code> for a session scoped to it.</p></div>
+      <div class="card"><div class="ic">🔎</div><h3>Diff, find, grep, browse</h3>
+        <p><code>g</code> the diff viewer, <code>f</code> the file finder, <code>F</code> a git grep, <code>b</code> the tree browser — all scoped to the selected worktree, one key from anywhere.</p></div>
+      <div class="card"><div class="ic">⌘</div><h3><code>/</code> finds anything, anywhere</h3>
+        <p>The palette spans every workspace, sorted by attention: needs-feedback first, then running, then unseen — so <code>/</code> <code>Enter</code> is the fastest way back to whatever needs you.</p></div>
+      <div class="card"><div class="ic">🛰️</div><h3>It follows you to other machines</h3>
+        <p><code>nebula ssh &lt;host&gt;</code> opens nubla x there, installing if missing. <code>nebula tunnel</code> puts that machine's TUI in a browser tab over one ssh tunnel.</p></div>
+      <div class="card"><div class="ic">📴</div><h3>No Electron, no browser, no MCP</h3>
+        <p>One ~4 MB Rust binary and a unix socket. A daemon and a ratatui client — that's the whole thing.</p></div>
+    </div>
+  </section>
+
+  <!-- jira board -->
+  <section class="wrap" id="board">
+    <div class="split">
+      <div>
+        <div class="kick">Jira-driven agentic workflow</div>
+        <h2>The ticket board, in your terminal</h2>
+        <p class="sub" style="margin:0;text-align:left">Pull the Jira tickets assigned to you and show them as a board —
+          cards you scan and open, kept current by the daemon whether or not the UI is open.
+          Press <code class="mono" style="color:var(--gold)">Shift+J</code> in the TUI, or run <code class="mono" style="color:var(--gold)">nebula web</code> for the same board in a browser.</p>
+        <div class="flist">
+          <div class="row"><span class="k">s</span><div><b>Start a run</b><p>The daemon cuts <code>feat/&lt;key&gt;-&lt;slug&gt;</code> and launches Claude with the ticket as context. Batch-start with a concurrency limit; the rest queue.</p></div></div>
+          <div class="row"><span class="k">✓</span><div><b>Checks &amp; an independent review stage</b><p>Configured checks run, plus a separate review pass, tracking quality evidence that goes stale when the code moves.</p></div></div>
+          <div class="row"><span class="k">↺</span><div><b>An honest loop</b><p>The agent reports with <code>nebula stage done</code>, the daemon captures the diff as evidence, and the card becomes <em>Ready</em> — a turn that ends without a report is <em>Needs input</em>, never a fake Ready.</p></div></div>
+          <div class="row"><span class="k">⛓</span><div><b>Dependency gating</b><p>Only explicit <em>Blocks</em> links gate a ticket; a blocked card shows <em>blocked by AQ-###</em> and sorts after the work you can actually start.</p></div></div>
+        </div>
+        <div class="cta" style="justify-content:flex-start;margin-top:26px">
+          <a class="btn gold" href="docs.html?doc=jira-tickets">Read the board docs</a>
+        </div>
+      </div>
+      <div><img src="assets/nebula-board.png" alt="nubla x Jira ticket board with cards, filters, evidence badges and status dots" loading="lazy"></div>
+    </div>
+  </section>
+
+  <!-- harnesses -->
+  <section class="wrap" id="harnesses">
+    <div class="sec-head">
+      <div class="kick">Supported harnesses</div>
+      <h2>Five CLIs out of the box</h2>
+      <p>Install the CLI, pick it in the <code>n</code> picker, done. A sixth, Grok, needs one config block. Teach nubla x any new CLI with one <code>harnesses</code> entry.</p>
+    </div>
+    <div class="harn">
+      <div class="h"><img src="https://www.google.com/s2/favicons?domain=claude.com&sz=128" alt="Claude"><b>Claude</b><span>claude</span></div>
+      <div class="h"><img src="https://www.google.com/s2/favicons?domain=openai.com&sz=128" alt="Codex"><b>Codex</b><span>codex</span></div>
+      <div class="h"><img src="https://www.google.com/s2/favicons?domain=cursor.com&sz=128" alt="Cursor"><b>Cursor</b><span>cursor-agent</span></div>
+      <div class="h"><img src="https://www.google.com/s2/favicons?domain=pi.dev&sz=128" alt="Pi"><b>Pi</b><span>pi</span></div>
+      <div class="h"><img src="https://www.google.com/s2/favicons?domain=meta.com&sz=128" alt="Muse"><b>Muse</b><span>muse</span></div>
+      <div class="h"><img src="https://www.google.com/s2/favicons?domain=x.ai&sz=128" alt="Grok"><b>Grok</b><span>grok</span></div>
+    </div>
+  </section>
+
+  <!-- quickstart -->
+  <section class="wrap" id="quickstart">
+    <div class="sec-head">
+      <div class="kick">Quickstart</div>
+      <h2>From zero to an agent in five keys</h2>
+    </div>
+    <div class="steps">
+      <div class="step"><h4>Add a repo</h4><p>A project is just a git checkout. <code>nebula add ~/code/my-app</code> — or <code>nebula add .</code> from inside it.</p></div>
+      <div class="step"><h4>Open the TUI</h4><p>A bare <code>nebula</code> launches it and auto-starts the daemon. <code>Tab</code> / <code>h l</code> move focus, <code>j k</code> the selection.</p></div>
+      <div class="step"><h4>Pick a worktree</h4><p><code>n</code> in the worktrees panel branches off into a real git worktree. Two agents, two directories, no collisions.</p></div>
+      <div class="step"><h4>Start the agent</h4><p><code>n</code> opens the picker — Claude, Codex, Cursor, Pi, Muse — then type the first prompt. Or <code>p</code> for a quick prompt.</p></div>
+      <div class="step"><h4>Walk away</h4><p><code>q</code> leaves the TUI; the daemon keeps every PTY. Come back with <code>nebula</code> an hour later, scrollback replayed.</p></div>
+    </div>
+  </section>
+
+  <!-- docs -->
+  <section class="wrap" id="docs">
+    <div class="docsband">
+      <div class="kick" style="font-family:var(--mono);font-size:13px;color:var(--gold);text-transform:uppercase;letter-spacing:.14em;font-weight:600">Documentation</div>
+      <h2 style="font-size:clamp(26px,4vw,36px);letter-spacing:-.03em;margin-top:12px;font-weight:800">Everything, one page away</h2>
+      <p style="color:var(--dim);max-width:520px;margin:14px auto 0">The full docs render right here in the browser — keys, commands, sessions, configuration and how it all works.</p>
+      <div class="docsgrid">
+        <a href="docs.html?doc=keys"><b>Keys</b><span>Every default binding &amp; the mouse</span></a>
+        <a href="docs.html?doc=commands"><b>Commands</b><span>The full nebula CLI (the binary keeps its name)</span></a>
+        <a href="docs.html?doc=sessions"><b>Sessions</b><span>Pickers, presets, cloud</span></a>
+        <a href="docs.html?doc=configuration"><b>Configuration</b><span>config.json &amp; settings</span></a>
+        <a href="docs.html?doc=jira-tickets"><b>Ticket board</b><span>The Jira workflow</span></a>
+        <a href="docs.html?doc=how-it-works"><b>How it works</b><span>The daemon &amp; hooks</span></a>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap foot-in">
+    <div>
+      <div class="brand" style="font-size:16px;margin-bottom:6px"><span class="dot"></span>nubla<span style="color:var(--gold)">&nbsp;x</span></div>
+      <span class="pill">MIT licensed · built with Rust</span>
+      <div style="margin-top:10px;color:var(--dim2);font-size:12.5px">
+        Forked from <a href="https://github.com/AgentSystemLabs/nebula" style="color:var(--dim)">AgentSystemLabs/nebula</a>
+      </div>
+    </div>
+    <div class="foot-links">
+      <a href="docs.html">Docs</a>
+      <a href="https://github.com/ameerdhi7/NebulaX">GitHub</a>
+      <a href="https://github.com/ameerdhi7/NebulaX/releases">Releases</a>
+      <a href="#top">Back to top ↑</a>
+    </div>
+  </div>
+</footer>
+
+<script>
+  function copyCmd(btn){
+    const t = document.getElementById('cmd').textContent;
+    navigator.clipboard.writeText(t).then(()=>{
+      const old = btn.textContent; btn.textContent='copied ✓';
+      setTimeout(()=>btn.textContent=old, 1400);
+    });
+  }
+</script>
+</body>
+</html>
